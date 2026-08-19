@@ -1,50 +1,18 @@
 import { createServer } from 'http';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { initDB, getUser, saveUser, getAllUsers } from './lib/db.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEATHERAPI_KEY = process.env.WEATHERAPI_KEY;
 const OWM_KEY = process.env.OWM_KEY;
 const RAINBOW_KEY = process.env.RAINBOW_KEY;
-const DB_FILE = join(__dirname, 'users.json');
-
-// === Database ===
-function loadUsers() {
-  if (!existsSync(DB_FILE)) {
-    saveUsers({ users: {} });
-  }
-  return JSON.parse(readFileSync(DB_FILE, 'utf-8'));
-}
-
-function saveUsers(data) {
-  writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-function getUser(chatId) {
-  const db = loadUsers();
-  return db.users[chatId] || null;
-}
-
-function saveUser(chatId, userData) {
-  const db = loadUsers();
-  db.users[chatId] = { ...db.users[chatId], ...userData, chatId };
-  saveUsers(db);
-}
-
-function getAllUsers() {
-  const db = loadUsers();
-  return Object.values(db.users);
-}
 
 // === Telegram API ===
 async function tgSendMessage(chatId, text, options = {}) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...options }),
+    body: JSON.stringify({ chat_id: chatId, text, ...options }),
   });
   return res.json();
 }
@@ -166,26 +134,26 @@ async function getRainForecast(lat, lon) {
   return { forecast: forecast || [], source };
 }
 
-function formatRainAlert(forecast, source) {
-  if (!forecast || forecast.length === 0) return 'Could not fetch weather data.';
+function formatRainAlert(forecast) {
+  if (!forecast || forecast.length === 0) return 'Не вдалося отримати дані про погоду.';
   const rainHours = forecast.filter(f => f.probability > 40);
 
   if (rainHours.length === 0) {
     const temp = forecast[0]?.temp_c;
-    return `No rain expected in the next few hours.${temp !== null ? `\nCurrent: ${temp}°C` : ''}`;
+    return `Дощ не очікується найближчими годинами.${temp !== null ? `\nЗараз: ${temp}°C` : ''}`;
   }
 
-  let msg = `Rain Alert!\n\nRain expected at:\n`;
+  let msg = `Штормове попередження!\n\nДощ очікується:\n`;
   for (const r of rainHours.slice(0, 5)) {
     const time = new Date(r.time);
     const h = time.getHours().toString().padStart(2, '0');
     const m = time.getMinutes().toString().padStart(2, '0');
-    msg += `${h}:${m} - ${r.probability}% chance, ${r.precip_mm}mm\n`;
+    msg += `${h}:${m} — ${r.probability}%, ${r.precip_mm}мм\n`;
   }
   if (rainHours[0]?.temp_c !== null) {
-    msg += `\nTemperature: ${rainHours[0].temp_c}°C`;
+    msg += `\nТемпература: ${rainHours[0].temp_c}°C`;
   }
-  msg += `\nDon't forget your umbrella!`;
+  msg += `\nНе забудь парасольку!`;
   return msg;
 }
 
@@ -196,58 +164,58 @@ async function handleMessage(message) {
 
   if (text === '/start') {
     await tgSendMessage(chatId,
-      `Rain Alert Bot\n\n` +
-      `I'll warn you when rain is approaching!\n\n` +
-      `Send me your location to get started.\n\n` +
-      `Commands:\n` +
-      `/check - check weather now\n` +
-      `/stop - stop alerts\n` +
-      `/start - show this message`
+      `Бот сповіщень про дощ\n\n` +
+      `Я попереджу тебе, коли наближається дощ!\n\n` +
+      `Надішли мені свою локацію, щоб почати.\n\n` +
+      `Команди:\n` +
+      `/check — перевірити погоду зараз\n` +
+      `/stop — вимкнути сповіщення\n` +
+      `/start — показати це повідомлення`
     );
     return;
   }
 
   if (text === '/stop') {
-    saveUser(chatId, { enabled: false });
-    await tgSendMessage(chatId, 'Alerts disabled. Send /start to re-enable.');
+    await saveUser(chatId, { enabled: false });
+    await tgSendMessage(chatId, 'Сповіщення вимкнено. Надішли /start, щоб увімкнути знову.');
     return;
   }
 
   if (text === '/check') {
-    const user = getUser(chatId);
+    const user = await getUser(chatId);
     if (!user || !user.latitude) {
-      await tgSendMessage(chatId, 'Send me your location first!');
+      await tgSendMessage(chatId, 'Спочатку надішли мені свою локацію!');
       return;
     }
-    const { forecast, source } = await getRainForecast(user.latitude, user.longitude);
-    const msg = formatRainAlert(forecast, source);
+    const { forecast } = await getRainForecast(user.latitude, user.longitude);
+    const msg = formatRainAlert(forecast);
     await tgSendMessage(chatId, msg);
     return;
   }
 
   if (message.location) {
-    saveUser(chatId, {
+    await saveUser(chatId, {
       latitude: message.location.latitude,
       longitude: message.location.longitude,
       enabled: true,
     });
-    const { forecast, source } = await getRainForecast(message.location.latitude, message.location.longitude);
-    const msg = formatRainAlert(forecast, source);
-    await tgSendMessage(chatId, `Location saved!\n\n${msg}`);
+    const { forecast } = await getRainForecast(message.location.latitude, message.location.longitude);
+    const msg = formatRainAlert(forecast);
+    await tgSendMessage(chatId, `Локацію збережено!\n\n${msg}`);
     return;
   }
 
-  await tgSendMessage(chatId, 'Send me your location or type /start');
+  await tgSendMessage(chatId, 'Надішли мені свою локацію або набери /start');
 }
 
 // === Cron Check ===
 async function checkAllUsers() {
-  const users = getAllUsers();
+  const users = await getAllUsers();
   let alertsSent = 0;
 
   for (const user of users) {
-    if (!user.enabled || !user.latitude) continue;
-    if (user.lastAlertTime && Date.now() - user.lastAlertTime < 2 * 60 * 60 * 1000) continue;
+    if (!user.latitude) continue;
+    if (user.last_alert_time && Date.now() - user.last_alert_time < 2 * 60 * 60 * 1000) continue;
 
     try {
       const { forecast } = await getRainForecast(user.latitude, user.longitude);
@@ -257,13 +225,13 @@ async function checkAllUsers() {
       });
 
       if (rainSoon) {
-        const msg = formatRainAlert(forecast, 'auto');
-        await tgSendMessage(user.chatId, msg);
-        saveUser(user.chatId, { lastAlertTime: Date.now() });
+        const msg = formatRainAlert(forecast);
+        await tgSendMessage(user.chat_id, msg);
+        await saveUser(user.chat_id, { last_alert_time: Date.now() });
         alertsSent++;
       }
     } catch (err) {
-      console.error(`Error for ${user.chatId}:`, err.message);
+      console.error(`Error for ${user.chat_id}:`, err.message);
     }
   }
   return alertsSent;
@@ -271,13 +239,11 @@ async function checkAllUsers() {
 
 // === HTTP Server ===
 const server = createServer(async (req, res) => {
-  // Health check
   if (req.url === '/' || req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ status: 'ok', bot: 'rain-alert-bot' }));
   }
 
-  // Telegram webhook
   if (req.url === '/webhook' && req.method === 'POST') {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -291,14 +257,18 @@ const server = createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true }));
   }
 
-  // Cron check endpoint
   if (req.url === '/check') {
-    const alertsSent = await checkAllUsers();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, alertsSent }));
+    try {
+      const alertsSent = await checkAllUsers();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, alertsSent }));
+    } catch (err) {
+      console.error('Check error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
   }
 
-  // Setup webhook
   if (req.url === '/setup-webhook' && req.method === 'POST') {
     const host = req.headers.host;
     const protocol = req.headers['x-forwarded-proto'] || 'https';
@@ -312,6 +282,17 @@ const server = createServer(async (req, res) => {
   res.end('Not Found');
 });
 
-server.listen(PORT, () => {
-  console.log(`Rain Alert Bot running on port ${PORT}`);
-});
+// === Start ===
+async function start() {
+  try {
+    await initDB();
+    server.listen(PORT, () => {
+      console.log(`Бот сповіщень про дощ працює на порту ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Failed to start:', err);
+    process.exit(1);
+  }
+}
+
+start();
