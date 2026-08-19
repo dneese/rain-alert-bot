@@ -292,7 +292,7 @@ const server = createServer(async (req, res) => {
   }
 
   // Cron check endpoint
-  if (req.url === '/check' && req.method === 'POST') {
+  if (req.url === '/check') {
     const alertsSent = await checkAllUsers();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, alertsSent }));
