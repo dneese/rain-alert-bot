@@ -1,0 +1,17 @@
+{
+  "name": "rain-alert-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that alerts users when rain is approaching",
+  "type": "module",
+  "scripts": {
+    "deploy": "npx tgcloud push",
+    "migrate": "npx tgcloud migrate",
+    "status": "npx tgcloud status",
+    "diff": "npx tgcloud diff",
+    "check": "node check-weather.js"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "^0.1.2"
+  },
+  "private": true
+}
