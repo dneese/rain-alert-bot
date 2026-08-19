@@ -283,16 +283,7 @@ const server = createServer(async (req, res) => {
 });
 
 // === Start ===
-async function start() {
-  try {
-    await initDB();
-    server.listen(PORT, () => {
-      console.log(`Бот сповіщень про дощ працює на порту ${PORT}`);
-    });
-  } catch (err) {
-    console.error('Failed to start:', err);
-    process.exit(1);
-  }
-}
-
-start();
+server.listen(PORT, async () => {
+  console.log(`Бот сповіщень про дощ працює на порту ${PORT}`);
+  initDB();
+});
