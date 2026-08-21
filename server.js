@@ -481,7 +481,7 @@ function formatWeatherMessage(weatherData, lang) {
     msg += `<b>Зараз:</b> ${rainIcon} ${Math.round(current.temp_c)}°C\n`;
     msg += `💧 ${Math.round(current.humidity)}%  💨 ${Math.round(current.wind_speed)}км/год\n`;
     if (current.precipitation_mm > 0) {
-      msg += `🌧 Опади: ${current.precip_mm}мм\n`;
+      msg += `🌧 Опади: ${current.precipitation_mm}мм\n`;
     }
     if (radar?.is_raining) {
       const radarDesc = ['', 'Слабкий', 'Помірний', 'Середній', 'Сильний', 'Дуже сильний'];
@@ -761,33 +761,43 @@ async function updateAllUsers() {
   return updated;
 }
 
-// === Cron Check (send new alerts when rain imminent OR active) ===
+// === Cron Check: edit existing + send new ONLY on rain transition ===
 async function checkAllUsers() {
   const users = await getAllUsers();
-  let alertsSent = 0;
+  let edited = 0, alertsSent = 0;
 
   for (const user of users) {
     if (!user.latitude) continue;
-    if (user.last_alert_time && Date.now() - user.last_alert_time < 10 * 60 * 1000) continue;
 
     try {
       const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
-
-      // Check if rain is imminent (within next 30 minutes)
       const rainSoon = weatherData.minutely?.some(m =>
         m.ms > weatherData.nowLocalMs &&
         m.ms < weatherData.nowLocalMs + 30 * 60 * 1000 &&
         m.precip_mm > 0.1
       );
+      const needsRainAlert = weatherData.isRaining || rainSoon;
+      const msg = formatWeatherMessage(weatherData, lang);
 
-      if (weatherData.isRaining || rainSoon) {
-        const msg = formatWeatherMessage(weatherData, lang);
-        const result = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
-        if (result.ok) {
+      // ALWAYS edit existing message (silent update, like /update)
+      if (user.last_message_id) {
+        const editResult = await tgEditMessage(user.chat_id, user.last_message_id, msg, {
+          reply_markup: mainMenuKeyboard(lang),
+        });
+        if (editResult.ok) edited++;
+      }
+
+      // Send NEW message ONLY on rain transition (triggers notification)
+      // Cooldown: 30 min between new alerts
+      const COOLDOWN_MS = 30 * 60 * 1000;
+      const lastAlert = user.last_alert_time || 0;
+      if (needsRainAlert && Date.now() - lastAlert > COOLDOWN_MS) {
+        const sendResult = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
+        if (sendResult.ok) {
           await saveUser(user.chat_id, {
             last_alert_time: Date.now(),
-            last_message_id: result.result.message_id,
+            last_message_id: sendResult.result.message_id,
           });
           alertsSent++;
         }
@@ -796,7 +806,7 @@ async function checkAllUsers() {
       console.error(`Check error for ${user.chat_id}:`, err.message);
     }
   }
-  return alertsSent;
+  return { edited, alertsSent };
 }
 
 // === HTTP Server ===
@@ -822,9 +832,9 @@ const server = createServer(async (req, res) => {
 
   if (req.url === '/check') {
     try {
-      const alertsSent = await checkAllUsers();
+      const result = await checkAllUsers();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, alertsSent }));
+      return res.end(JSON.stringify({ ok: true, edited: result.edited, alertsSent: result.alertsSent }));
     } catch (err) {
       console.error('Check error:', err);
       res.writeHead(500, { 'Content-Type': 'application/json' });
