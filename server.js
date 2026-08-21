@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import { createRequire } from 'module';
-import { initDB, getUser, saveUser, getAllUsers, getUserApiKey, getAllUserApiKeys, saveUserApiKey, deleteUserApiKey } from './lib/db.js';
+import { initDB, getUser, saveUser, getAllUsers, getUserApiKey, getAllUserApiKeys, saveUserApiKey, deleteUserApiKey, getUserSettings, saveUserSettings } from './lib/db.js';
 import { t, getLangName, getLangFlag, languagePages } from './lib/i18n.js';
 
 const require = createRequire(import.meta.url);
@@ -112,6 +112,67 @@ function confirmKeyKeyboard(lang, provider) {
   return {
     inline_keyboard: [
       [{ text: t(lang, 'btn_cancel'), callback_data: 'cb_api_keys' }],
+    ],
+  };
+}
+
+function settingsDetailKeyboard(lang, settings) {
+  const s = settings || {};
+  const radarLabel = s.radar_enabled !== false ? '📡 Radar ✅' : '📡 Radar ❌';
+  return {
+    inline_keyboard: [
+      [
+        { text: `🌧 Поріг: ${s.rain_threshold_mm || 0.5}мм`, callback_data: 'cb_settings_threshold' },
+      ],
+      [
+        { text: `⏱ Прогноз: ${s.lookahead_min || 30}хв`, callback_data: 'cb_settings_lookahead' },
+      ],
+      [
+        { text: radarLabel, callback_data: 'cb_settings_radar' },
+      ],
+      [
+        { text: `⏰ Кулдаун: ${s.alert_cooldown_min || 30}хв`, callback_data: 'cb_settings_cooldown' },
+      ],
+      [
+        { text: s.posture === 'outside' ? '🚶 Зараз надворі' : '🏠 Зараз вдома', callback_data: 'cb_settings_posture' },
+      ],
+      [
+        { text: t(lang, 'api_keys_label'), callback_data: 'cb_api_keys' },
+        { text: t(lang, 'language_label'), callback_data: 'cb_lang' },
+      ],
+      [
+        { text: t(lang, 'btn_back'), callback_data: 'cb_back_main' },
+      ],
+    ],
+  };
+}
+
+function thresholdKeyboard(lang) {
+  const thresholds = [0.1, 0.3, 0.5, 1.0, 2.0];
+  return {
+    inline_keyboard: [
+      thresholds.map(v => ({ text: `${v}мм`, callback_data: `cb_set_threshold_${v}` })),
+      [{ text: t(lang, 'btn_back'), callback_data: 'cb_settings_detail' }],
+    ],
+  };
+}
+
+function lookaheadKeyboard(lang) {
+  const options = [15, 30, 60, 120];
+  return {
+    inline_keyboard: [
+      options.map(v => ({ text: `${v}хв`, callback_data: `cb_set_lookahead_${v}` })),
+      [{ text: t(lang, 'btn_back'), callback_data: 'cb_settings_detail' }],
+    ],
+  };
+}
+
+function cooldownKeyboard(lang) {
+  const options = [10, 15, 30, 60];
+  return {
+    inline_keyboard: [
+      options.map(v => ({ text: `${v}хв`, callback_data: `cb_set_cooldown_${v}` })),
+      [{ text: t(lang, 'btn_back'), callback_data: 'cb_settings_detail' }],
     ],
   };
 }
@@ -348,11 +409,15 @@ async function getRainForecast(lat, lon, chatId) {
     console.warn('Open-Meteo failed:', e.message);
   }
 
-  // 2. RainViewer: real-time radar (FREE, no key)
+  // 2. RainViewer: real-time radar (FREE, no key) — SUPPLEMENTARY only
   try {
     result.radar = await fetchRainViewer(lat, lon);
-    if (result.radar.is_raining) result.isRaining = true;
     if (result.radar.stale) console.warn('RainViewer radar data is stale');
+    // Radar ONLY confirms rain if Open-Meteo ALREADY shows rain signs
+    // Don't let radar alone trigger isRaining (causes false positives)
+    if (result.radar.is_raining && (result.isRaining || result.current?.precipitation_mm > 0)) {
+      result.isRaining = true;
+    }
   } catch (e) {
     console.warn('RainViewer failed:', e.message);
   }
@@ -441,7 +506,7 @@ function formatDate(timeStr, lang, tzOffsetMs) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
 }
 
-function formatWeatherMessage(weatherData, lang) {
+function formatWeatherMessage(weatherData, lang, settings) {
   const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
   if (!current && (!forecast || forecast.length === 0)) {
@@ -525,15 +590,30 @@ function formatWeatherMessage(weatherData, lang) {
   }
 
   // === RECOMMENDATION ===
+  const posture = settings?.posture || 'inside';
+  const isOutside = posture === 'outside';
+  
   if (isRaining || radar?.is_raining) {
-    msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
+    if (isOutside) {
+      msg += `⚠️ <b>Йде дощ! Знайди укриття!</b>\n`;
+    } else {
+      msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
+    }
   } else {
     const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
     if (nextRainMinutely || nextRainHourly) {
-      msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
+      if (isOutside) {
+        msg += `⚠️ <b>Дощ через хвилини! Повертайся додому!</b>\n`;
+      } else {
+        msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
+      }
     } else {
-      msg += `✅ <b>Можна виходити без парасольки.</b>\n`;
+      if (isOutside) {
+        msg += `✅ <b>Погода нормальна, залишайся надворі.</b>\n`;
+      } else {
+        msg += `✅ <b>Можна виходити без парасольки.</b>\n`;
+      }
     }
   }
 
@@ -573,7 +653,8 @@ async function handleCallbackQuery(callbackQuery) {
       return;
     }
     const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
-    const msg = formatWeatherMessage(weatherData, lang);
+    const settings = await getUserSettings(chatId);
+    const msg = formatWeatherMessage(weatherData, lang, settings);
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -584,10 +665,127 @@ async function handleCallbackQuery(callbackQuery) {
   if (data === 'cb_settings') {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
     const keys = await getAllUserApiKeys(chatId);
-    const activeCount = keys.length;
-    const msg = `<b>${t(uLang, 'settings_title')}</b>\n\n${t(uLang, 'language_label')}: ${getLangFlag(uLang)} ${getLangName(uLang)}\n${t(uLang, 'api_keys_label')}: ${t(uLang, 'api_keys_count', { active: activeCount })}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsKeyboard(uLang) });
+    const postureEmoji = settings?.posture === 'outside' ? '🚶' : '🏠';
+    const msg = `<b>⚙️ Налаштування</b>\n\n` +
+      `🌧 Поріг дощу: <b>${settings?.rain_threshold_mm || 0.5}мм</b>\n` +
+      `⏱ Вікно прогнозу: <b>${settings?.lookahead_min || 30}хв</b>\n` +
+      `📡 Радар: <b>${settings?.radar_enabled !== false ? 'Увімкнено' : 'Вимкнено'}</b>\n` +
+      `⏰ Кулдаун алертів: <b>${settings?.alert_cooldown_min || 30}хв</b>\n` +
+      `${postureEmoji} Режим: <b>${settings?.posture === 'outside' ? 'Надворі 🚶' : 'Вдома 🏠'}</b>\n\n` +
+      `🌐 Мова: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
+      `🔑 API ключі: ${keys.length}`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
+    return;
+  }
+
+  if (data === 'cb_settings_detail') {
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    const keys = await getAllUserApiKeys(chatId);
+    const postureEmoji = settings?.posture === 'outside' ? '🚶' : '🏠';
+    const msg = `<b>⚙️ Налаштування</b>\n\n` +
+      `🌧 Поріг дощу: <b>${settings?.rain_threshold_mm || 0.5}мм</b>\n` +
+      `⏱ Вікно прогнозу: <b>${settings?.lookahead_min || 30}хв</b>\n` +
+      `📡 Радар: <b>${settings?.radar_enabled !== false ? 'Увімкнено' : 'Вимкнено'}</b>\n` +
+      `⏰ Кулдаун алертів: <b>${settings?.alert_cooldown_min || 30}хв</b>\n` +
+      `${postureEmoji} Режим: <b>${settings?.posture === 'outside' ? 'Надворі 🚶' : 'Вдома 🏠'}</b>\n\n` +
+      `🌐 Мова: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
+      `🔑 API ключі: ${keys.length}`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
+    return;
+  }
+
+  if (data === 'cb_settings_threshold') {
+    await tgAnswerCallback(callbackQuery.id, 'Оберіть поріг дощу');
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    const msg = `<b>🌧 Поріг дощу</b>\n\nМінімальна кількість опадів для сповіщення.\nЗараз: <b>${settings?.rain_threshold_mm || 0.5}мм</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
+    return;
+  }
+
+  if (data.startsWith('cb_set_threshold_')) {
+    const value = parseFloat(data.replace('cb_set_threshold_', ''));
+    await saveUserSettings(chatId, { rain_threshold_mm: value });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    await tgAnswerCallback(callbackQuery.id, `Поріг: ${value}мм`);
+    const msg = `<b>✅ Поріг дощу встановлено: ${value}мм</b>\n\nНатисніть кнопку щоб повернутись.`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
+    return;
+  }
+
+  if (data === 'cb_settings_lookahead') {
+    await tgAnswerCallback(callbackQuery.id, 'Оберіть вікно прогнозу');
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    const msg = `<b>⏱ Вікно прогнозу</b>\n\nНа скільки хвилин вперед дивитись для алертів.\nЗараз: <b>${settings?.lookahead_min || 30}хв</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
+    return;
+  }
+
+  if (data.startsWith('cb_set_lookahead_')) {
+    const value = parseInt(data.replace('cb_set_lookahead_', ''));
+    await saveUserSettings(chatId, { lookahead_min: value });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    await tgAnswerCallback(callbackQuery.id, `Прогноз: ${value}хв`);
+    const msg = `<b>✅ Вікно прогнозу встановлено: ${value}хв</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
+    return;
+  }
+
+  if (data === 'cb_settings_radar') {
+    const settings = await getUserSettings(chatId);
+    const newEnabled = settings?.radar_enabled === false;
+    await saveUserSettings(chatId, { radar_enabled: newEnabled });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const updatedSettings = await getUserSettings(chatId);
+    await tgAnswerCallback(callbackQuery.id, newEnabled ? 'Радар увімкнено' : 'Радар вимкнено');
+    const msg = `<b>⚙️ Налаштування</b>\n\n📡 Радар: <b>${newEnabled ? 'Увімкнено' : 'Вимкнено'}</b>\n\nНатисніть кнопку щоб повернутись.`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
+    return;
+  }
+
+  if (data === 'cb_settings_cooldown') {
+    await tgAnswerCallback(callbackQuery.id, 'Оберіть кулдаун');
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    const msg = `<b>⏰ Кулдаун алертів</b>\n\nМінімальний інтервал між сповіщеннями про дощ.\nЗараз: <b>${settings?.alert_cooldown_min || 30}хв</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
+    return;
+  }
+
+  if (data.startsWith('cb_set_cooldown_')) {
+    const value = parseInt(data.replace('cb_set_cooldown_', ''));
+    await saveUserSettings(chatId, { alert_cooldown_min: value });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    await tgAnswerCallback(callbackQuery.id, `Кулдаун: ${value}хв`);
+    const msg = `<b>✅ Кулдаун встановлено: ${value}хв</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
+    return;
+  }
+
+  if (data === 'cb_settings_posture') {
+    const settings = await getUserSettings(chatId);
+    const newPosture = settings?.posture === 'outside' ? 'inside' : 'outside';
+    await saveUserSettings(chatId, { posture: newPosture });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const updatedSettings = await getUserSettings(chatId);
+    const label = newPosture === 'outside' ? '🚶 Надворі' : '🏠 Вдома';
+    await tgAnswerCallback(callbackQuery.id, label);
+    const msg = `<b>✅ Режим змінено: ${label}</b>`;
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
     return;
   }
 
@@ -674,6 +872,22 @@ async function handleMessage(message) {
     return;
   }
 
+  if (text === '/inside') {
+    await saveUserSettings(chatId, { posture: 'inside' });
+    const user = await getUser(chatId);
+    const lang = user?.language || 'uk';
+    await tgSendMessage(chatId, '🏠 Режим: <b>Вдома</b>\n\nПоради з урахуванням того, що ви вдома.', { reply_markup: mainMenuKeyboard(lang) });
+    return;
+  }
+
+  if (text === '/outside') {
+    await saveUserSettings(chatId, { posture: 'outside' });
+    const user = await getUser(chatId);
+    const lang = user?.language || 'uk';
+    await tgSendMessage(chatId, '🚶 Режим: <b>Надворі</b>\n\nПоради з урахуванням того, що ви надворі.', { reply_markup: mainMenuKeyboard(lang) });
+    return;
+  }
+
   if (text === '/check') {
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
@@ -682,7 +896,8 @@ async function handleMessage(message) {
       return;
     }
     const weatherData = await getRainForecast(user.latitude, user.longitude, chatId);
-    const msg = formatWeatherMessage(weatherData, lang);
+    const settings = await getUserSettings(chatId);
+    const msg = formatWeatherMessage(weatherData, lang, settings);
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -699,7 +914,8 @@ async function handleMessage(message) {
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
     const weatherData = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
-    const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(weatherData, lang)}`;
+    const settings = await getUserSettings(chatId);
+    const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(weatherData, lang, settings)}`;
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -745,7 +961,8 @@ async function updateAllUsers() {
     try {
       const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
-      const msg = formatWeatherMessage(weatherData, lang);
+      const settings = await getUserSettings(user.chat_id);
+      const msg = formatWeatherMessage(weatherData, lang, settings);
       const result = await tgEditMessage(user.chat_id, user.last_message_id, msg, {
         reply_markup: mainMenuKeyboard(lang),
       });
@@ -770,15 +987,30 @@ async function checkAllUsers() {
     if (!user.latitude) continue;
 
     try {
+      const settings = await getUserSettings(user.chat_id);
       const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
+
+      const lookaheadMs = (settings?.lookahead_min || 30) * 60 * 1000;
+      const threshold = settings?.rain_threshold_mm || 0.5;
+      const cooldownMs = (settings?.alert_cooldown_min || 30) * 60 * 1000;
+      const radarEnabled = settings?.radar_enabled !== false;
+
       const rainSoon = weatherData.minutely?.some(m =>
         m.ms > weatherData.nowLocalMs &&
-        m.ms < weatherData.nowLocalMs + 30 * 60 * 1000 &&
-        m.precip_mm > 0.1
+        m.ms < weatherData.nowLocalMs + lookaheadMs &&
+        m.precip_mm >= threshold
       );
       const needsRainAlert = weatherData.isRaining || rainSoon;
-      const msg = formatWeatherMessage(weatherData, lang);
+
+      // Debounce: check if rain state changed from last check
+      const wasRaining = user.last_rain_state || false;
+      const rainTransition = needsRainAlert && !wasRaining;
+
+      // Update rain state
+      await saveUser(user.chat_id, { last_rain_state: needsRainAlert });
+
+      const msg = formatWeatherMessage(weatherData, lang, settings);
 
       // ALWAYS edit existing message (silent update, like /update)
       if (user.last_message_id) {
@@ -789,10 +1021,9 @@ async function checkAllUsers() {
       }
 
       // Send NEW message ONLY on rain transition (triggers notification)
-      // Cooldown: 30 min between new alerts
-      const COOLDOWN_MS = 30 * 60 * 1000;
+      // Uses per-user cooldown from settings
       const lastAlert = user.last_alert_time || 0;
-      if (needsRainAlert && Date.now() - lastAlert > COOLDOWN_MS) {
+      if (rainTransition && Date.now() - lastAlert > cooldownMs) {
         const sendResult = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
         if (sendResult.ok) {
           await saveUser(user.chat_id, {
