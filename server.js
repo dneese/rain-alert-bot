@@ -113,6 +113,133 @@ function confirmKeyKeyboard(lang, provider) {
 }
 
 // === Weather APIs ===
+
+// WMO Weather interpretation codes
+const WMO_CODES = {
+  0: { desc: 'Clear', icon: '☀️', rain: false },
+  1: { desc: 'Mainly clear', icon: '🌤', rain: false },
+  2: { desc: 'Partly cloudy', icon: '⛅', rain: false },
+  3: { desc: 'Overcast', icon: '☁️', rain: false },
+  45: { desc: 'Fog', icon: '🌫', rain: false },
+  48: { desc: 'Rime fog', icon: '🌫', rain: false },
+  51: { desc: 'Light drizzle', icon: '🌦', rain: true },
+  53: { desc: 'Moderate drizzle', icon: '🌦', rain: true },
+  55: { desc: 'Dense drizzle', icon: '🌧', rain: true },
+  56: { desc: 'Freezing drizzle', icon: '🌧', rain: true },
+  57: { desc: 'Heavy freezing drizzle', icon: '🌧', rain: true },
+  61: { desc: 'Slight rain', icon: '🌦', rain: true },
+  63: { desc: 'Moderate rain', icon: '🌧', rain: true },
+  65: { desc: 'Heavy rain', icon: '🌧', rain: true },
+  66: { desc: 'Freezing rain', icon: '🌧', rain: true },
+  67: { desc: 'Heavy freezing rain', icon: '🌧', rain: true },
+  71: { desc: 'Slight snow', icon: '❄️', rain: true },
+  73: { desc: 'Moderate snow', icon: '❄️', rain: true },
+  75: { desc: 'Heavy snow', icon: '❄️', rain: true },
+  77: { desc: 'Snow grains', icon: '❄️', rain: true },
+  80: { desc: 'Slight showers', icon: '🌦', rain: true },
+  81: { desc: 'Moderate showers', icon: '🌧', rain: true },
+  82: { desc: 'Violent showers', icon: '🌧', rain: true },
+  85: { desc: 'Slight snow showers', icon: '🌨', rain: true },
+  86: { desc: 'Heavy snow showers', icon: '🌨', rain: true },
+  95: { desc: 'Thunderstorm', icon: '⛈', rain: true },
+  96: { desc: 'Thunderstorm with hail', icon: '⛈', rain: true },
+  99: { desc: 'Thunderstorm with heavy hail', icon: '⛈', rain: true },
+};
+
+// Open-Meteo: current + minutely_15 + hourly in ONE call
+async function fetchOpenMeteoFull(lat, lon) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m&timezone=auto&forecast_days=2`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
+  const data = await res.json();
+  const now = new Date();
+
+  const current = {
+    temp_c: data.current.temperature_2m,
+    humidity: data.current.relative_humidity_2m,
+    precipitation_mm: data.current.precipitation,
+    rain_mm: data.current.rain,
+    weather_code: data.current.weather_code,
+    wind_speed: data.current.wind_speed_10m,
+    is_raining: WMO_CODES[data.current.weather_code]?.rain || data.current.precipitation > 0,
+    weather_icon: WMO_CODES[data.current.weather_code]?.icon || '🌤',
+    weather_desc: WMO_CODES[data.current.weather_code]?.desc || 'Unknown',
+  };
+
+  const minutely = (data.minutely_15?.time || [])
+    .map((t, i) => ({
+      time: t,
+      precip_mm: data.minutely_15.precipitation[i],
+      probability: data.minutely_15.precipitation_probability[i],
+    }))
+    .filter(h => new Date(h.time) >= new Date(now.getTime() - 15 * 60 * 1000));
+
+  const hourly = (data.hourly?.time || [])
+    .map((t, i) => ({
+      time: t,
+      probability: data.hourly.precipitation_probability[i],
+      precip_mm: data.hourly.precipitation[i],
+      temp_c: data.hourly.temperature_2m[i],
+      wind_speed: data.hourly.wind_speed_10m[i],
+    }))
+    .filter(h => new Date(h.time) >= now);
+
+  return { current, minutely, hourly };
+}
+
+// RainViewer: real-time radar precipitation
+async function fetchRainViewer(lat, lon) {
+  const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+  if (!res.ok) throw new Error(`RainViewer: ${res.status}`);
+  const data = await res.json();
+  const pastFrames = data.radar?.past || [];
+  if (pastFrames.length === 0) return { is_raining: false, intensity: 0 };
+
+  const lastFrame = pastFrames[pastFrames.length - 1];
+  const frameTime = lastFrame.time * 1000;
+  const ageMinutes = (Date.now() - frameTime) / (1000 * 60);
+
+  if (ageMinutes > 30) return { is_raining: false, intensity: 0, stale: true };
+
+  const zoom = 6;
+  const latRad = lat * Math.PI / 180;
+  const n = Math.pow(2, zoom);
+  const x = Math.floor((lon + 180) / 360 * n);
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+
+  const tileUrl = `https://tilecache.rainviewer.com${lastFrame.path}/${zoom}/${x}/${y}/6/1_1.png`;
+  const tileRes = await fetch(tileUrl);
+  if (!tileRes.ok) return { is_raining: false, intensity: 0 };
+
+  const buf = Buffer.from(await tileRes.arrayBuffer());
+  const centerPixel = getCenterPixel(buf);
+  if (!centerPixel) return { is_raining: false, intensity: 0 };
+
+  const intensity = getRadarIntensity(centerPixel);
+  return { is_raining: intensity > 0, intensity, ageMinutes: Math.round(ageMinutes) };
+}
+
+function getCenterPixel(pngBuf) {
+  try {
+    const width = pngBuf.readUInt32BE(16);
+    const height = pngBuf.readUInt32BE(20);
+    const centerX = Math.floor(width / 2);
+    const centerY = Math.floor(height / 2);
+    return { r: pngBuf[54 + centerX * 4], g: pngBuf[55 + centerX * 4], b: pngBuf[56 + centerX * 4], a: pngBuf[57 + centerX * 4] };
+  } catch { return null; }
+}
+
+function getRadarIntensity(pixel) {
+  if (!pixel || pixel.a === 0) return 0;
+  const { r, g, b } = pixel;
+  if (r > 200 && g < 100 && b < 100) return 5;
+  if (r > 200 && g > 100 && b < 100) return 4;
+  if (r > 100 && g > 200 && b < 100) return 3;
+  if (r < 100 && g > 100 && b > 200) return 2;
+  if (r < 100 && g > 200 && b > 200) return 1;
+  return 0;
+}
+
 async function fetchWeatherAPI(lat, lon, apiKey) {
   const key = apiKey || WEATHERAPI_KEY;
   if (!key) return null;
@@ -132,112 +259,84 @@ async function fetchWeatherAPI(lat, lon, apiKey) {
     }));
 }
 
-async function fetchOWMNowcast(lat, lon, apiKey) {
-  const key = apiKey || OWM_KEY;
-  if (!key) return null;
-  const url = `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&exclude=hourly,daily,alerts&appid=${key}&units=metric`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`OWM: ${res.status}`);
-  const data = await res.json();
-  if (!data.minutely) return [];
-  return data.minutely.map(m => ({
-    time: new Date(m.dt * 1000).toISOString(),
-    probability: m.precipitation > 0 ? 100 : 0,
-    precip_mm: m.precipitation,
-    temp_c: null,
-  }));
-}
-
-async function fetchRainbowNowcast(lat, lon, apiKey) {
-  const key = apiKey || RAINBOW_KEY;
-  if (!key) return null;
-  const url = `https://api.rainbow.ai/nowcast/v1/precip/${lon}/${lat}`;
-  const res = await fetch(url, { headers: { 'x-api-key': key } });
-  if (!res.ok) throw new Error(`Rainbow: ${res.status}`);
-  const data = await res.json();
-  if (!data.forecast) return [];
-  return data.forecast.map(f => ({
-    time: new Date(f.timestampBegin * 1000).toISOString(),
-    probability: f.precipRate > 0 ? 100 : 0,
-    precip_mm: f.precipRate,
-    temp_c: null,
-  }));
-}
-
-async function fetchOpenMeteo(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m&timezone=auto&forecast_days=2`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
-  const data = await res.json();
-  const now = new Date();
-  return data.hourly.time
-    .map((t, i) => ({
-      time: t,
-      probability: data.hourly.precipitation_probability[i],
-      precip_mm: data.hourly.precipitation[i],
-      temp_c: data.hourly.temperature_2m[i],
-      wind_speed: data.hourly.wind_speed_10m[i],
-    }))
-    .filter(h => new Date(h.time) >= now);
-}
-
 async function getRainForecast(lat, lon, chatId) {
-  let forecast = [];
-  let source = 'none';
+  let result = {
+    current: null,
+    minutely: [],
+    forecast: [],
+    radar: { is_raining: false, intensity: 0 },
+    source: 'none',
+    isRaining: false,
+  };
 
-  const userKeys = {};
-  if (chatId) {
+  // 1. Open-Meteo: current + minutely_15 + hourly (PRIMARY - free, reliable)
+  try {
+    const om = await fetchOpenMeteoFull(lat, lon);
+    result.current = om.current;
+    result.minutely = om.minutely;
+    result.forecast = om.hourly;
+    result.source = 'Open-Meteo';
+    result.isRaining = om.current.is_raining;
+  } catch (e) {
+    console.warn('Open-Meteo failed:', e.message);
+  }
+
+  // 2. RainViewer: real-time radar (FREE, no key)
+  try {
+    result.radar = await fetchRainViewer(lat, lon);
+    if (result.radar.is_raining) result.isRaining = true;
+    if (result.radar.stale) console.warn('RainViewer radar data is stale');
+  } catch (e) {
+    console.warn('RainViewer failed:', e.message);
+  }
+
+  // 3. Check minutely_15 for recent/upcoming rain even if current is dry
+  const now = new Date();
+  const next30min = new Date(now.getTime() + 30 * 60 * 1000);
+  const recentRain = result.minutely.some(m => {
+    const t = new Date(m.time);
+    return t >= now && t <= next30min && m.precip_mm > 0.1;
+  });
+  if (recentRain) result.isRaining = true;
+
+  // 4. WeatherAPI/OWM/Rainbow: supplementary (only if user has keys)
+  if (chatId && !result.isRaining) {
     const providers = ['weatherapi', 'owm', 'rainbow'];
     for (const p of providers) {
-      const key = await getUserApiKey(chatId, p);
-      if (key) userKeys[p] = key;
-    }
-  }
-
-  try {
-    forecast = await fetchWeatherAPI(lat, lon, userKeys.weatherapi);
-    source = 'WeatherAPI';
-  } catch (e) {
-    console.warn('WeatherAPI failed:', e.message);
-  }
-
-  const rainSoon = forecast?.some(f => {
-    const diff = (new Date(f.time) - new Date()) / (1000 * 60);
-    return diff <= 120 && f.probability > 50;
-  });
-
-  if (rainSoon) {
-    try {
-      const nowcast = await fetchOWMNowcast(lat, lon, userKeys.owm);
-      if (nowcast?.length > 0) { forecast = nowcast; source = 'OpenWeatherMap'; }
-    } catch (e) {
-      console.warn('OWM failed:', e.message);
       try {
-        const nowcast = await fetchRainbowNowcast(lat, lon, userKeys.rainbow);
-        if (nowcast?.length > 0) { forecast = nowcast; source = 'Rainbow'; }
-      } catch (e2) {
-        console.warn('Rainbow failed:', e2.message);
+        const key = await getUserApiKey(chatId, p);
+        if (!key) continue;
+        if (p === 'weatherapi') {
+          const wa = await fetchWeatherAPI(lat, lon, key);
+          if (wa) {
+            const hasRain = wa.some(f => {
+              const diff = (new Date(f.time) - now) / (1000 * 60);
+              return diff <= 60 && f.precip_mm > 0.2;
+            });
+            if (hasRain) {
+              result.forecast = wa;
+              result.source = 'WeatherAPI';
+              result.isRaining = true;
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`${p} failed:`, e.message);
       }
     }
   }
 
-  if (!forecast || forecast.length === 0) {
-    try {
-      forecast = await fetchOpenMeteo(lat, lon);
-      source = 'Open-Meteo';
-    } catch (e) {
-      console.warn('Open-Meteo failed:', e.message);
-    }
-  }
-
-  return { forecast: forecast || [], source };
+  return result;
 }
 
 // === Weather Display ===
 function getWeatherEmoji(probability, precipMm) {
   if (precipMm > 2) return '🌧';
+  if (precipMm > 0.5) return '🌧';
+  if (precipMm > 0.1) return '🌦';
   if (probability > 60) return '🌧';
-  if (probability > 30) return '🌤';
+  if (probability > 30) return '⛅';
   return '☀️';
 }
 
@@ -245,6 +344,15 @@ function makeRainBar(probability) {
   const filled = Math.round(probability / 10);
   const empty = 10 - filled;
   return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+function makePrecipBar(precipMm) {
+  if (precipMm <= 0) return '░░░░░░░░░░';
+  if (precipMm < 0.5) return '█░░░░░░░░░';
+  if (precipMm < 1) return '██░░░░░░░░';
+  if (precipMm < 2) return '████░░░░░░';
+  if (precipMm < 5) return '██████░░░░';
+  return '████████░░';
 }
 
 function formatTime(isoStr) {
@@ -263,72 +371,103 @@ function formatDate(isoStr, lang) {
   return d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
 }
 
-function formatWeatherMessage(forecast, lang, source) {
-  if (!forecast || forecast.length === 0) {
+function formatWeatherMessage(weatherData, lang) {
+  const { current, minutely, forecast, radar, source, isRaining } = weatherData;
+
+  if (!current && (!forecast || forecast.length === 0)) {
     return `<b>${t(lang, 'error_no_forecast')}</b>`;
   }
 
-  const now = new Date();
-  const twoHoursFromNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
-  const sixHoursFromNow = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+  let msg = '';
 
-  const rainSoon = forecast.filter(f => {
-    const d = new Date(f.time);
-    return d >= now && d <= twoHoursFromNow && f.probability > 50;
-  });
-
-  const rainLater = forecast.filter(f => {
-    const d = new Date(f.time);
-    return d > twoHoursFromNow && d <= sixHoursFromNow && f.probability > 40;
-  });
-
-  const header = rainSoon.length > 0
-    ? `<b>${t(lang, 'rain_coming', { minutes: Math.round((new Date(rainSoon[0].time) - now) / 60000) })}</b>`
-    : rainLater.length > 0
-    ? `<b>${t(lang, 'rain_alert_title')}</b>`
-    : `<b>${t(lang, 'no_rain_header')}</b>`;
-
-  let msg = header + '\n\n';
-
-  const displayHours = forecast.slice(0, 12);
-  let lastDate = '';
-
-  for (const h of displayHours) {
-    const dateStr = formatDate(h.time, lang);
-    if (dateStr !== lastDate) {
-      msg += `<b>${dateStr}</b>\n`;
-      lastDate = dateStr;
+  // === HEADER ===
+  if (isRaining || radar.is_raining) {
+    const rainMm = current?.precipitation_mm || radar.intensity * 0.5 || 0;
+    const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
+    msg += `<b>${intensity}</b>\n`;
+    msg += `<b>Спочатку дощ, потім — перевір погоду</b>\n\n`;
+  } else {
+    const nextRain = minutely?.find(m => m.precip_mm > 0.1 && new Date(m.time) > new Date());
+    if (nextRain) {
+      const minsAway = Math.round((new Date(nextRain.time) - new Date()) / 60000);
+      msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${minsAway} ХВ</b>\n\n`;
+    } else {
+      const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && new Date(f.time) > new Date());
+      if (rainInForecast) {
+        const hoursAway = Math.round((new Date(rainInForecast.time) - new Date()) / (1000 * 60 * 60));
+        msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${hoursAway}год</b>\n\n`;
+      } else {
+        msg += `<b>☀️ Без опадів</b>\n\n`;
+      }
     }
+  }
 
-    const time = formatTime(h.time);
-    const emoji = getWeatherEmoji(h.probability, h.precip_mm);
-    const bar = makeRainBar(h.probability);
-    const temp = h.temp_c !== null && h.temp_c !== undefined ? `${Math.round(h.temp_c)}°` : '--';
-    const precip = h.precip_mm > 0 ? `${h.precip_mm.toFixed(1)}мм` : '';
-
-    msg += `<code>${time}  ${emoji} ${bar}  ${h.probability}%  ${temp}</code>`;
-    if (precip) msg += ` <i>${precip}</i>`;
+  // === CURRENT CONDITIONS ===
+  if (current) {
+    const rainIcon = current.is_raining ? '🌧' : current.weather_icon;
+    msg += `<b>Зараз:</b> ${rainIcon} ${Math.round(current.temp_c)}°C\n`;
+    msg += `💧 ${Math.round(current.humidity)}%  💨 ${Math.round(current.wind_speed)}км/год\n`;
+    if (current.precipitation_mm > 0) {
+      msg += `🌧 Опади: ${current.precip_mm}мм\n`;
+    }
+    if (radar?.is_raining) {
+      const radarDesc = ['', 'Слабкий', 'Помірний', 'Середній', 'Сильний', 'Дуже сильний'];
+      msg += `📡 Радар: ${radarDesc[radar.intensity] || 'Так'} (${radar.ageMinutes || '?'}хв тому)\n`;
+    }
     msg += '\n';
   }
 
-  const currentTemp = forecast[0]?.temp_c;
-  const currentWind = forecast[0]?.wind_speed;
-  if (currentTemp !== null && currentTemp !== undefined) {
-    msg += `\n${t(lang, 'temp_now', { temp: Math.round(currentTemp) })}`;
-  }
-  if (currentWind !== null && currentWind !== undefined) {
-    msg += `\n${t(lang, 'wind_now', { speed: Math.round(currentWind) })}`;
+  // === MINUTELY (next 2 hours, most accurate) ===
+  if (minutely && minutely.length > 0) {
+    msg += `<b>Наступні 2 години (15хв):</b>\n`;
+    const displayMinutely = minutely.slice(0, 8);
+    for (const m of displayMinutely) {
+      const time = formatTime(m.time);
+      const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
+      const bar = makePrecipBar(m.precip_mm);
+      const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}мм` : '';
+      msg += `<code>${time} ${emoji} ${bar}${precip}</code>\n`;
+    }
+    msg += '\n';
   }
 
-  if (rainSoon.length > 0 || rainLater.length > 0) {
-    msg += `\n\n${t(lang, 'recommendation_umbrella')}`;
+  // === HOURLY FORECAST ===
+  if (forecast && forecast.length > 0) {
+    msg += `<b>Прогноз:</b>\n`;
+    const displayHours = forecast.slice(0, 8);
+    let lastDate = '';
+    for (const h of displayHours) {
+      const dateStr = formatDate(h.time, lang);
+      if (dateStr !== lastDate) {
+        msg += `<i>${dateStr}</i>\n`;
+        lastDate = dateStr;
+      }
+      const time = formatTime(h.time);
+      const emoji = getWeatherEmoji(h.probability, h.precip_mm);
+      const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
+      const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}мм` : '';
+      msg += `<code>${time} ${emoji} ${h.probability}% ${temp}${precip}</code>\n`;
+    }
+    msg += '\n';
+  }
+
+  // === RECOMMENDATION ===
+  if (isRaining || radar?.is_raining) {
+    msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
   } else {
-    msg += `\n\n${t(lang, 'recommendation_no_rain')}`;
+    const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && new Date(m.time) > new Date());
+    const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && new Date(f.time) > new Date());
+    if (nextRainMinutely || nextRainHourly) {
+      msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
+    } else {
+      msg += `✅ <b>Можна виходити без парасольки.</b>\n`;
+    }
   }
 
   const nowTime = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
-  msg += `\n\n${t(lang, 'updated_at', { time: nowTime })}`;
-  msg += `\n<i>${source}</i>`;
+  msg += `\n🕐 ${t(lang, 'updated_at', { time: nowTime })}`;
+  if (source) msg += ` | ${source}`;
+  if (radar?.is_raining) msg += ` | 📡 Radar`;
 
   return msg;
 }
@@ -361,8 +500,8 @@ async function handleCallbackQuery(callbackQuery) {
       await tgSendMessage(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
       return;
     }
-    const { forecast, source } = await getRainForecast(u.latitude, u.longitude, chatId);
-    const msg = formatWeatherMessage(forecast, lang, source);
+    const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
+    const msg = formatWeatherMessage(weatherData, lang);
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -470,8 +609,8 @@ async function handleMessage(message) {
       await tgSendMessage(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
       return;
     }
-    const { forecast, source } = await getRainForecast(user.latitude, user.longitude, chatId);
-    const msg = formatWeatherMessage(forecast, lang, source);
+    const weatherData = await getRainForecast(user.latitude, user.longitude, chatId);
+    const msg = formatWeatherMessage(weatherData, lang);
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -487,8 +626,8 @@ async function handleMessage(message) {
     });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    const { forecast, source } = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
-    const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(forecast, lang, source)}`;
+    const weatherData = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
+    const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(weatherData, lang)}`;
     const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -532,9 +671,9 @@ async function updateAllUsers() {
     if (!user.latitude || !user.last_message_id) continue;
 
     try {
-      const { forecast, source } = await getRainForecast(user.latitude, user.longitude, user.chat_id);
+      const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
-      const msg = formatWeatherMessage(forecast, lang, source);
+      const msg = formatWeatherMessage(weatherData, lang);
       const result = await tgEditMessage(user.chat_id, user.last_message_id, msg, {
         reply_markup: mainMenuKeyboard(lang),
       });
@@ -557,19 +696,14 @@ async function checkAllUsers() {
 
   for (const user of users) {
     if (!user.latitude) continue;
-    if (user.last_alert_time && Date.now() - user.last_alert_time < 2 * 60 * 60 * 1000) continue;
+    if (user.last_alert_time && Date.now() - user.last_alert_time < 30 * 60 * 1000) continue;
 
     try {
-      const { forecast, source } = await getRainForecast(user.latitude, user.longitude, user.chat_id);
+      const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
 
-      const rainSoon = forecast.filter(f => {
-        const diff = (new Date(f.time) - new Date()) / (1000 * 60);
-        return diff <= 60 && f.probability > 60;
-      });
-
-      if (rainSoon.length > 0) {
-        const msg = formatWeatherMessage(forecast, lang, source);
+      if (weatherData.isRaining) {
+        const msg = formatWeatherMessage(weatherData, lang);
         const result = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
         if (result.ok) {
           await saveUser(user.chat_id, {
