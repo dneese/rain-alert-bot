@@ -158,22 +158,15 @@ async function fetchOpenMeteoFull(lat, lon) {
   const data = await res.json();
   const tzOffsetSec = data.utc_offset_seconds || 0;
 
-  // Convert API time string (in local tz) to a comparable timestamp
+  // Convert API time string (in local tz) to real UTC epoch
   function apiTimeToMs(timeStr) {
     if (!timeStr) return 0;
     const d = new Date(timeStr + 'Z');
-    return d.getTime() + tzOffsetSec * 1000;
+    return d.getTime() - tzOffsetSec * 1000;
   }
 
-  // Get "now" in the API's timezone
-  const nowUtcMs = Date.now();
-  const nowLocalMs = nowUtcMs + tzOffsetSec * 1000;
-
-  function toLocalTime(timeStr) {
-    if (!timeStr) return null;
-    const ms = apiTimeToMs(timeStr);
-    return { ms, str: timeStr };
-  }
+  // "Now" in real UTC
+  const nowLocalMs = Date.now();
 
   const current = {
     temp_c: data.current.temperature_2m,
@@ -382,7 +375,8 @@ async function getRainForecast(lat, lon, chatId) {
           const wa = await fetchWeatherAPI(lat, lon, key);
           if (wa) {
             const hasRain = wa.some(f => {
-              const diff = ((new Date(f.time + 'Z').getTime() + 10800000) - result.nowLocalMs) / (1000 * 60);
+              const fUtcMs = new Date(f.time + 'Z').getTime() - 10800000;
+              const diff = (fUtcMs - result.nowLocalMs) / (1000 * 60);
               return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
             });
             if (hasRain) {
@@ -427,36 +421,24 @@ function makePrecipBar(precipMm) {
   return '████████░░';
 }
 
-function formatTime(timeOrStr, tzOffsetMs) {
-  let d;
-  if (timeOrStr instanceof Date) {
-    d = timeOrStr;
-  } else if (typeof timeOrStr === 'string') {
-    d = new Date(timeOrStr + 'Z');
-    if (tzOffsetMs) d = new Date(d.getTime() + tzOffsetMs);
-  } else {
-    d = new Date();
-  }
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+function formatTime(timeStr) {
+  if (!timeStr) return '??:??';
+  const parts = timeStr.split('T');
+  if (parts.length === 2) return parts[1];
+  return '??:??';
 }
 
-function formatDate(timeOrStr, lang, tzOffsetMs) {
-  let d;
-  if (timeOrStr instanceof Date) {
-    d = timeOrStr;
-  } else if (typeof timeOrStr === 'string') {
-    d = new Date(timeOrStr + 'Z');
-    if (tzOffsetMs) d = new Date(d.getTime() + tzOffsetMs);
-  } else {
-    d = new Date();
-  }
-  const now = new Date(Date.now() + (tzOffsetMs || 0));
-  const tomorrow = new Date(now);
-  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+function formatDate(timeStr, lang, tzOffsetMs) {
+  if (!timeStr) return '';
+  const datePart = timeStr.split('T')[0];
+  const nowLocal = new Date(Date.now() + (tzOffsetMs || 0));
+  const todayStr = nowLocal.toISOString().split('T')[0];
+  const tomorrowStr = new Date(nowLocal.getTime() + 86400000).toISOString().split('T')[0];
 
-  if (d.toDateString() === now.toDateString()) return t(lang, 'date_today');
-  if (d.toDateString() === tomorrow.toDateString()) return t(lang, 'date_tomorrow');
-  return d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
+  if (datePart === todayStr) return t(lang, 'date_today');
+  if (datePart === tomorrowStr) return t(lang, 'date_tomorrow');
+  const [y, m, d] = datePart.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
 }
 
 function formatWeatherMessage(weatherData, lang) {
@@ -779,20 +761,27 @@ async function updateAllUsers() {
   return updated;
 }
 
-// === Cron Check (send new alerts only when rain imminent) ===
+// === Cron Check (send new alerts when rain imminent OR active) ===
 async function checkAllUsers() {
   const users = await getAllUsers();
   let alertsSent = 0;
 
   for (const user of users) {
     if (!user.latitude) continue;
-    if (user.last_alert_time && Date.now() - user.last_alert_time < 30 * 60 * 1000) continue;
+    if (user.last_alert_time && Date.now() - user.last_alert_time < 10 * 60 * 1000) continue;
 
     try {
       const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
       const lang = user.language || 'uk';
 
-      if (weatherData.isRaining) {
+      // Check if rain is imminent (within next 30 minutes)
+      const rainSoon = weatherData.minutely?.some(m =>
+        m.ms > weatherData.nowLocalMs &&
+        m.ms < weatherData.nowLocalMs + 30 * 60 * 1000 &&
+        m.precip_mm > 0.1
+      );
+
+      if (weatherData.isRaining || rainSoon) {
         const msg = formatWeatherMessage(weatherData, lang);
         const result = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
         if (result.ok) {
