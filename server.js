@@ -641,7 +641,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   let msg = '';
 
   // === HEADER ===
-  if (isRaining || radar.is_raining) {
+  if (isRaining) {
     const rainMm = current?.precipitation_mm || radar.intensity * 0.5 || 0;
     const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ ДОЩ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
     msg += `<b>${intensity}</b>\n\n`;
@@ -714,7 +714,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   const posture = settings?.posture || 'inside';
   const isOutside = posture === 'outside';
   
-  if (isRaining || radar?.is_raining) {
+  if (isRaining) {
     if (isOutside) {
       msg += `⚠️ <b>Йде дощ! Знайди укриття!</b>\n`;
     } else {
@@ -1137,6 +1137,13 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     await tgSendMessage(chatId, '📍 Надішліть назву нової локації (напр. "Робота"):', {
+      reply_markup: {
+        keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+        one_time_keyboard: true,
+        resize_keyboard: true,
+      },
+    });
+    await tgSendMessage(chatId, 'Або введіть назву текстом:', {
       reply_markup: { inline_keyboard: [[{ text: '◀ Назад', callback_data: 'cb_adv_locations' }]] },
     });
     return;
@@ -1300,14 +1307,33 @@ async function handleMessage(message) {
 
   // Handle pending location name for multi-location
   if (pendingCallbacks[chatId]?.action === 'location_name') {
+    // If user sends location directly (not a name), use default name
+    if (message.location) {
+      const lat = message.location.latitude;
+      const lon = message.location.longitude;
+      delete pendingCallbacks[chatId];
+      await addUserLocation(chatId, 'Локація', lat, lon);
+      const user = await getUser(chatId);
+      const lang = user?.language || 'uk';
+      const locations = await getUserLocations(chatId);
+      await tgSendMessage(chatId, `✅ Локацію додано!`, {
+        reply_markup: { remove_keyboard: true },
+      });
+      await tgSendMessage(chatId, `📍 Ваши локації:`, { reply_markup: locationsKeyboard(lang, locations) });
+      return;
+    }
     const locName = text?.trim();
     if (!locName || locName.length > 50) {
       await tgSendMessage(chatId, '❌ Назва занадто довга (макс 50 символів). Спробуйте ще:');
       return;
     }
     pendingCallbacks[chatId] = { action: 'location_coords', name: locName, messageId: pendingCallbacks[chatId].messageId };
-    await tgSendMessage(chatId, `📍 Тепер надішліть геолокацію для "${locName}" або введіть координати у форматі: 49.825,23.951`, {
-      reply_markup: { inline_keyboard: [[{ text: '◀ Назад', callback_data: 'cb_adv_locations' }]] },
+    await tgSendMessage(chatId, `📍 Тепер надішліть геолокацію для "${locName}" або введіть координати:`, {
+      reply_markup: {
+        keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+        one_time_keyboard: true,
+        resize_keyboard: true,
+      },
     });
     return;
   }
@@ -1330,7 +1356,13 @@ async function handleMessage(message) {
     }
 
     if (lat == null || lon == null) {
-      await tgSendMessage(chatId, '❌ Невірний формат. Надішліть геолокацію або координати (49.825,23.951):');
+      await tgSendMessage(chatId, '❌ Невірний формат. Надішліть геолокацію або координати (49.825,23.951):', {
+        reply_markup: {
+          keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+          one_time_keyboard: true,
+          resize_keyboard: true,
+        },
+      });
       return;
     }
 
@@ -1338,7 +1370,10 @@ async function handleMessage(message) {
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
     const locations = await getUserLocations(chatId);
-    await tgSendMessage(chatId, `✅ Локацію "${name}" додано!`, { reply_markup: locationsKeyboard(lang, locations) });
+    await tgSendMessage(chatId, `✅ Локацію "${name}" додано!`, {
+      reply_markup: { remove_keyboard: true },
+    });
+    await tgSendMessage(chatId, `📍 Ваши локації:`, { reply_markup: locationsKeyboard(lang, locations) });
     return;
   }
 
