@@ -30,8 +30,8 @@ async function tgEditMessage(chatId, messageId, text, options = {}) {
   return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', ...options });
 }
 
-async function tgAnswerCallback(callbackQueryId, text = '') {
-  return tgApi('answerCallbackQuery', { callback_query_id: callbackQueryId, text, show_alert: false });
+async function tgAnswerCallback(callbackQueryId, text = '', showAlert = false) {
+  return tgApi('answerCallbackQuery', { callback_query_id: callbackQueryId, text, show_alert: showAlert });
 }
 
 async function tgSetWebhook(url) {
@@ -83,7 +83,7 @@ function apiKeysKeyboard(lang, activeKeys) {
   return { inline_keyboard: rows };
 }
 
-function languageKeyboard(page = 0) {
+function languageKeyboard(page = 0, lang = 'uk') {
   const perPage = 9;
   const start = page * perPage;
   const pageLangs = languagePages.slice(start, start + perPage);
@@ -104,7 +104,7 @@ function languageKeyboard(page = 0) {
   if (page < totalPages - 1) navRow.push({ text: '▶', callback_data: `cb_lang_page_${page + 1}` });
   rows.push(navRow);
 
-  rows.push([{ text: '◀ Back', callback_data: 'cb_settings' }]);
+  rows.push([{ text: t(lang, 'btn_back'), callback_data: 'cb_settings' }]);
   return { inline_keyboard: rows };
 }
 
@@ -122,22 +122,22 @@ function settingsDetailKeyboard(lang, settings) {
   return {
     inline_keyboard: [
       [
-        { text: `🌧 Поріг: ${s.rain_threshold_mm || 0.5}мм`, callback_data: 'cb_settings_threshold' },
+        { text: `🌧 ${t(lang, 'set_rain_threshold')}: <b>${s.rain_threshold_mm || 0.5}${t(lang, 'unit_mm')}</b>`, callback_data: 'cb_settings_threshold' },
       ],
       [
-        { text: `⏱ Прогноз: ${s.lookahead_min || 30}хв`, callback_data: 'cb_settings_lookahead' },
+        { text: `⏱ ${t(lang, 'set_lookahead')}: <b>${s.lookahead_min || 30}${t(lang, 'unit_min')}</b>`, callback_data: 'cb_settings_lookahead' },
       ],
       [
-        { text: radarLabel, callback_data: 'cb_settings_radar' },
+        { text: `${radarLabel}`, callback_data: 'cb_settings_radar' },
       ],
       [
-        { text: `⏰ Кулдаун: ${s.alert_cooldown_min || 30}хв`, callback_data: 'cb_settings_cooldown' },
+        { text: `⏰ ${t(lang, 'set_cooldown')}: <b>${s.alert_cooldown_min || 30}${t(lang, 'unit_min')}</b>`, callback_data: 'cb_settings_cooldown' },
       ],
       [
-        { text: s.posture === 'outside' ? '🚶 Зараз надворі' : '🏠 Зараз вдома', callback_data: 'cb_settings_posture' },
+        { text: `${s.posture === 'outside' ? '🚶' : '🏠'} ${t(lang, 'set_mode')}: <b>${s.posture === 'outside' ? t(lang, 'mode_outside') : t(lang, 'mode_inside')}</b>`, callback_data: 'cb_settings_posture' },
       ],
       [
-        { text: '🔧 Розширені', callback_data: 'cb_adv_settings' },
+        { text: `🔧 ${t(lang, 'set_advanced') || 'Розширені'}`, callback_data: 'cb_adv_settings' },
       ],
       [
         { text: t(lang, 'api_keys_label'), callback_data: 'cb_api_keys' },
@@ -188,13 +188,13 @@ function advancedSettingsKeyboard(lang, settings) {
   const tempOn = s.temp_threshold_c != null;
   return {
     inline_keyboard: [
-      [{ text: `🔕 Тихі години: ${qhOn ? s.quiet_hours_start + '-' + s.quiet_hours_end : 'Вимкнено'}`, callback_data: 'cb_adv_quiet' }],
-      [{ text: `💨 Вітер: ${windOn ? '>'+s.wind_threshold_kmh+'км/год' : 'Вимкнено'}`, callback_data: 'cb_adv_wind' }],
-      [{ text: `💧 Вологість: ${humOn ? '>'+s.humidity_threshold_pct+'%' : 'Вимкнено'}`, callback_data: 'cb_adv_humidity' }],
-      [{ text: `🌡 Температура: ${tempOn ? '<'+s.temp_threshold_c+'°C' : 'Вимкнено'}`, callback_data: 'cb_adv_temp' }],
-      [{ text: '🌩 Рівні дощу', callback_data: 'cb_adv_rain_levels' }],
-      [{ text: '📊 Секції повідомлення', callback_data: 'cb_adv_sections' }],
-      [{ text: '📍 Локації', callback_data: 'cb_adv_locations' }],
+      [{ text: `🔕 ${t(lang, 'set_quiet_hours')}: ${qhOn ? s.quiet_hours_start + '-' + s.quiet_hours_end : t(lang, 'off')}`, callback_data: 'cb_adv_quiet' }],
+      [{ text: `💨 ${t(lang, 'set_wind_threshold')}: ${windOn ? '>'+s.wind_threshold_kmh+'км/год' : t(lang, 'off')}`, callback_data: 'cb_adv_wind' }],
+      [{ text: `💧 ${t(lang, 'set_humidity_threshold')}: ${humOn ? '>'+s.humidity_threshold_pct+'%' : t(lang, 'off')}`, callback_data: 'cb_adv_humidity' }],
+      [{ text: `🌡 ${t(lang, 'set_temp_threshold')}: ${tempOn ? '<'+s.temp_threshold_c+'°C' : t(lang, 'off')}`, callback_data: 'cb_adv_temp' }],
+      [{ text: `🌩 ${t(lang, 'set_rain_levels')}`, callback_data: 'cb_adv_rain_levels' }],
+      [{ text: `📊 ${t(lang, 'set_sections')}`, callback_data: 'cb_adv_sections' }],
+      [{ text: `📍 ${t(lang, 'set_locations')}`, callback_data: 'cb_adv_locations' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_settings_detail' }],
     ],
   };
@@ -209,7 +209,7 @@ function quietHoursKeyboard(lang) {
     inline_keyboard: [
       hours.slice(0, 6),
       hours.slice(6, 12),
-      [{ text: '❌ Вимкнути', callback_data: 'cb_qh_off' }],
+      [{ text: t(lang, 'btn_disable'), callback_data: 'cb_qh_off' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
     ],
   };
@@ -234,7 +234,7 @@ function windThresholdKeyboard(lang) {
   return {
     inline_keyboard: [
       options.map(v => ({ text: `>${v}`, callback_data: `cb_set_wind_${v}` })),
-      [{ text: '❌ Вимкнути', callback_data: 'cb_set_wind_0' }],
+      [{ text: t(lang, 'btn_disable'), callback_data: 'cb_set_wind_0' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
     ],
   };
@@ -245,7 +245,7 @@ function humidityThresholdKeyboard(lang) {
   return {
     inline_keyboard: [
       options.map(v => ({ text: `>${v}%`, callback_data: `cb_set_hum_${v}` })),
-      [{ text: '❌ Вимкнути', callback_data: 'cb_set_hum_0' }],
+      [{ text: t(lang, 'btn_disable'), callback_data: 'cb_set_hum_0' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
     ],
   };
@@ -256,7 +256,7 @@ function tempThresholdKeyboard(lang) {
   return {
     inline_keyboard: [
       options.map(v => ({ text: `<${v}°C`, callback_data: `cb_set_temp_${v}` })),
-      [{ text: '❌ Вимкнути', callback_data: 'cb_set_temp_999' }],
+      [{ text: t(lang, 'btn_disable'), callback_data: 'cb_set_temp_999' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
     ],
   };
@@ -293,7 +293,7 @@ function locationsKeyboard(lang, locations) {
     { text: `${loc.is_default ? '⭐' : '📍'} ${loc.name} (${loc.latitude.toFixed(2)}, ${loc.longitude.toFixed(2)})`, callback_data: `cb_loc_default_${loc.id}` },
     { text: '🗑', callback_data: `cb_loc_delete_${loc.id}` },
   ]));
-  rows.push([{ text: '➕ Додати локацію', callback_data: 'cb_loc_add' }]);
+  rows.push([{ text: t(lang, 'btn_add_location'), callback_data: 'cb_loc_add' }]);
   rows.push([{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }]);
   return { inline_keyboard: rows };
 }
@@ -320,21 +320,21 @@ const WMO_CODES = {
   67: { desc: 'Heavy freezing rain', icon: '🌧', rain: true },
   71: { desc: 'Slight snow', icon: '❄️', rain: true },
   73: { desc: 'Moderate snow', icon: '❄️', rain: true },
-  75: { desc: 'Heavy snow', icon: '❄️', rain: true },
+  75: { desc: 'Heavy snow', icon: '❄️', rain: true, severe: true },
   77: { desc: 'Snow grains', icon: '❄️', rain: true },
   80: { desc: 'Slight showers', icon: '🌦', rain: true },
   81: { desc: 'Moderate showers', icon: '🌧', rain: true },
-  82: { desc: 'Violent showers', icon: '🌧', rain: true },
+  82: { desc: 'Violent showers', icon: '🌧', rain: true, severe: true },
   85: { desc: 'Slight snow showers', icon: '🌨', rain: true },
-  86: { desc: 'Heavy snow showers', icon: '🌨', rain: true },
-  95: { desc: 'Thunderstorm', icon: '⛈', rain: true },
-  96: { desc: 'Thunderstorm with hail', icon: '⛈', rain: true },
-  99: { desc: 'Thunderstorm with heavy hail', icon: '⛈', rain: true },
+  86: { desc: 'Heavy snow showers', icon: '🌨', rain: true, severe: true },
+  95: { desc: 'Thunderstorm', icon: '⛈', rain: true, severe: true },
+  96: { desc: 'Thunderstorm with hail', icon: '⛈', rain: true, severe: true },
+  99: { desc: 'Thunderstorm with heavy hail', icon: '⛈', rain: true, severe: true },
 };
 
 // Open-Meteo: current + minutely_15 + hourly in ONE call
 async function fetchOpenMeteoFull(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m&timezone=auto&forecast_days=2`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m,weather_code&timezone=auto&forecast_days=2`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
   const data = await res.json();
@@ -380,6 +380,7 @@ async function fetchOpenMeteoFull(lat, lon) {
       precip_mm: data.hourly.precipitation[i],
       temp_c: data.hourly.temperature_2m[i],
       wind_speed: data.hourly.wind_speed_10m[i],
+      wmo_code: data.hourly.weather_code[i],
     }))
     .filter(h => h.ms >= nowLocalMs);
 
@@ -400,7 +401,7 @@ async function fetchRainViewer(lat, lon) {
 
   if (ageMinutes > 30) return { is_raining: false, intensity: 0, stale: true };
 
-  const zoom = 6;
+  const zoom = 8;
   const latRad = lat * Math.PI / 180;
   const n = Math.pow(2, zoom);
   const x = Math.floor((lon + 180) / 360 * n);
@@ -624,7 +625,9 @@ function formatDate(timeStr, lang, tzOffsetMs) {
   if (datePart === todayStr) return t(lang, 'date_today');
   if (datePart === tomorrowStr) return t(lang, 'date_tomorrow');
   const [y, m, d] = datePart.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
+  const localeMap = { uk: 'uk-UA', en: 'en-US', ru: 'ru-RU', pl: 'pl-PL', de: 'de-DE', fr: 'fr-FR', es: 'es-ES', it: 'it-IT', pt: 'pt-PT', nl: 'nl-NL', cs: 'cs-CZ', sk: 'sk-SK', ro: 'ro-RO', hu: 'hu-HU', bg: 'bg-BG', hr: 'hr-HR', tr: 'tr-TR', ar: 'ar-SA', he: 'he-IL', zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR' };
+  const locale = localeMap[lang] || 'en-US';
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString(locale, { day: 'numeric', month: 'long' });
 }
 
 function formatWeatherMessage(weatherData, lang, settings) {
@@ -642,21 +645,21 @@ function formatWeatherMessage(weatherData, lang, settings) {
 
   // === HEADER ===
   if (isRaining) {
-    const rainMm = current?.precipitation_mm || radar.intensity * 0.5 || 0;
-    const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ ДОЩ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
+    const rainMm = current?.precipitation_mm || 0;
+    const intensity = rainMm > 3 ? `⚠️ ${t(lang, 'alert_strong_rain')}` : rainMm > 1 ? `🌧 ${t(lang, 'alert_rain')}` : `🌦 ${t(lang, 'alert_light_rain')}`;
     msg += `<b>${intensity}</b>\n\n`;
   } else {
     const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
       const minsAway = Math.round((nextRain.ms - nowLocalMs) / 60000);
-      msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${minsAway} ХВ</b>\n\n`;
+      msg += `<b>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</b>\n\n`;
     } else {
       const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
         const hoursAway = Math.round((rainInForecast.ms - nowLocalMs) / (1000 * 60 * 60));
-        msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${hoursAway}год</b>\n\n`;
+        msg += `<b>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</b>\n\n`;
       } else {
-        msg += `<b>☀️ Без опадів</b>\n\n`;
+        msg += `<b>☀️ ${t(lang, 'no_rain_header')}</b>\n\n`;
       }
     }
   }
@@ -664,27 +667,27 @@ function formatWeatherMessage(weatherData, lang, settings) {
   // === CURRENT CONDITIONS ===
   if (current && settings?.show_current !== false) {
     const rainIcon = current.is_raining ? '🌧' : current.weather_icon;
-    msg += `<b>Зараз:</b> ${rainIcon} ${Math.round(current.temp_c)}°C\n`;
-    msg += `💧 ${Math.round(current.humidity)}%  💨 ${Math.round(current.wind_speed)}км/год\n`;
+    msg += `<b>${t(lang, 'current_label')}:</b> ${rainIcon} ${Math.round(current.temp_c)}°C\n`;
+    msg += `💧 ${Math.round(current.humidity)}%  💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}\n`;
     if (current.precipitation_mm > 0) {
-      msg += `🌧 Опади: ${current.precipitation_mm}мм\n`;
+      msg += `🌧 ${t(lang, 'precip_label')}: ${current.precipitation_mm}${t(lang, 'unit_mm')}\n`;
     }
     if (radar?.is_raining && settings?.show_radar !== false) {
-      const radarDesc = ['', 'Слабкий', 'Помірний', 'Середній', 'Сильний', 'Дуже сильний'];
-      msg += `📡 Радар: ${radarDesc[radar.intensity] || 'Так'} (${radar.ageMinutes || '?'}хв тому)\n`;
+      const radarDesc = ['', t(lang, 'radar_weak'), t(lang, 'radar_moderate'), t(lang, 'radar_strong'), t(lang, 'radar_very_strong'), t(lang, 'radar_extreme')];
+      msg += `📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})\n`;
     }
     msg += '\n';
   }
 
   // === MINUTELY (next 2 hours, most accurate) ===
   if (minutely && minutely.length > 0 && settings?.show_minutely !== false) {
-    msg += `<b>Наступні 2 години (15хв):</b>\n`;
+    msg += `<b>${t(lang, 'minutely_label')}:</b>\n`;
     const displayMinutely = minutely.slice(0, 8);
     for (const m of displayMinutely) {
       const time = m.timeStr.split('T')[1];
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
-      const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}мм` : '';
+      const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
       msg += `<code>${time} ${emoji} ${bar}${precip}</code>\n`;
     }
     msg += '\n';
@@ -692,7 +695,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
 
   // === HOURLY FORECAST ===
   if (forecast && forecast.length > 0 && settings?.show_hourly !== false) {
-    msg += `<b>Прогноз:</b>\n`;
+    msg += `<b>${t(lang, 'forecast_label')}:</b>\n`;
     const displayHours = forecast.slice(0, 8);
     let lastDate = '';
     for (const h of displayHours) {
@@ -704,7 +707,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
       const time = h.timeStr.split('T')[1];
       const emoji = getWeatherEmoji(h.probability, h.precip_mm);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
-      const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}мм` : '';
+      const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
       msg += `<code>${time} ${emoji} ${h.probability}% ${temp}${precip}</code>\n`;
     }
     msg += '\n';
@@ -713,34 +716,101 @@ function formatWeatherMessage(weatherData, lang, settings) {
   // === RECOMMENDATION ===
   const posture = settings?.posture || 'inside';
   const isOutside = posture === 'outside';
-  
+
   if (isRaining) {
     if (isOutside) {
-      msg += `⚠️ <b>Йде дощ! Знайди укриття!</b>\n`;
+      msg += `⚠️ <b>${t(lang, 'rec_rain_outside')}</b>\n`;
     } else {
-      msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
+      msg += `⚠️ <b>${t(lang, 'rec_rain_inside')}</b>\n`;
     }
   } else {
     const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
-    if (nextRainMinutely || nextRainHourly) {
-      if (isOutside) {
-        msg += `⚠️ <b>Дощ через хвилини! Повертайся додому!</b>\n`;
+    let rainETAms = null;
+    if (nextRainMinutely) rainETAms = nextRainMinutely.ms;
+    else if (nextRainHourly) rainETAms = nextRainHourly.ms;
+
+    if (rainETAms) {
+      const minsAway = Math.round((rainETAms - nowLocalMs) / 60000);
+      const hoursAway = Math.round(minsAway / 60);
+      let timeStr;
+      if (minsAway < 60) {
+        timeStr = t(lang, 'eta_minutes', { minutes: minsAway });
+      } else if (hoursAway === 1) {
+        timeStr = t(lang, 'eta_hour');
       } else {
-        msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
+        timeStr = t(lang, 'eta_hours', { hours: hoursAway });
+      }
+
+      if (minsAway <= 30) {
+        if (isOutside) {
+          msg += `🔴 <b>${t(lang, 'rec_urgent_outside', { time: timeStr })}</b>\n`;
+        } else {
+          msg += `🟡 <b>${t(lang, 'rec_urgent_inside', { time: timeStr })}</b>\n`;
+        }
+      } else if (minsAway <= 120) {
+        if (isOutside) {
+          msg += `🟡 <b>${t(lang, 'rec_moderate_outside', { time: timeStr })}</b>\n`;
+        } else {
+          msg += `🟡 <b>${t(lang, 'rec_moderate_inside', { time: timeStr })}</b>\n`;
+        }
+      } else {
+        if (isOutside) {
+          msg += `ℹ️ <b>${t(lang, 'rec_far_outside', { time: timeStr })}</b>\n`;
+        } else {
+          msg += `ℹ️ <b>${t(lang, 'rec_far_inside', { time: timeStr })}</b>\n`;
+        }
       }
     } else {
       if (isOutside) {
-        msg += `✅ <b>Погода нормальна, залишайся надворі.</b>\n`;
+        msg += `✅ <b>${t(lang, 'rec_no_rain_outside')}</b>\n`;
       } else {
-        msg += `✅ <b>Можна виходити без парасольки.</b>\n`;
+        msg += `✅ <b>${t(lang, 'rec_no_rain_inside')}</b>\n`;
       }
     }
   }
 
+  // === SEVERE WEATHER WARNINGS ===
+  const hasSevereCurrent = current && WMO_CODES[current.weather_code]?.severe;
+  const hasSevereForecast = forecast?.some(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs && f.ms < nowLocalMs + (settings?.lookahead_min || 60) * 60 * 1000);
+  const hasHailNow = current && (current.weather_code === 96 || current.weather_code === 99);
+  const hasHailSoon = forecast?.some(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs && f.ms < nowLocalMs + 120 * 60 * 1000);
+
+  if (hasSevereCurrent || hasSevereForecast || hasHailNow || hasHailSoon) {
+    msg += `\n🚨 <b>${t(lang, 'severe_title')}:</b>\n`;
+    if (hasHailNow) {
+      msg += `⛈ <b>${t(lang, 'severe_hail_now')}</b>\n`;
+      msg += `${t(lang, 'severe_hail_shelter')}\n`;
+    } else if (hasSevereCurrent) {
+      const sevDesc = t(lang, 'wmo_' + current.weather_code) || WMO_CODES[current.weather_code]?.desc || '';
+      msg += `⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b>\n`;
+      msg += `${t(lang, 'severe_wait_shelter')}\n`;
+    }
+    if (hasHailSoon && !hasHailNow) {
+      const hailTime = forecast.find(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs);
+      if (hailTime) {
+        const hailMins = Math.round((hailTime.ms - nowLocalMs) / 60000);
+        const hailHrs = Math.round(hailMins / 60);
+        const hailETA = hailMins < 60 ? t(lang, 'eta_minutes', { minutes: hailMins }) : t(lang, 'eta_hours', { hours: hailHrs });
+        msg += `⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b>\n`;
+        msg += `${t(lang, 'severe_hail_prepare')}\n`;
+      }
+    } else if (hasSevereForecast && !hasSevereCurrent) {
+      const sevTime = forecast.find(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs);
+      if (sevTime) {
+        const sevMins = Math.round((sevTime.ms - nowLocalMs) / 60000);
+        const sevHrs = Math.round(sevMins / 60);
+        const sevETA = sevMins < 60 ? t(lang, 'eta_minutes', { minutes: sevMins }) : t(lang, 'eta_hours', { hours: sevHrs });
+        msg += `⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b>\n`;
+        msg += `${t(lang, 'severe_prepare_shelter')}\n`;
+      }
+    }
+    msg += '\n';
+  }
+
   msg += `\n🕐 ${t(lang, 'updated_at', { time: nowTimeStr })}`;
   if (source) msg += ` | ${source}`;
-  if (radar?.is_raining) msg += ` | 📡 Radar`;
+  if (radar?.is_raining && isRaining) msg += ` | 📡 Radar`;
 
   return msg;
 }
@@ -783,48 +853,30 @@ async function handleCallbackQuery(callbackQuery) {
     return;
   }
 
-  if (data === 'cb_settings') {
+  if (data === 'cb_settings' || data === 'cb_settings_detail') {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     const keys = await getAllUserApiKeys(chatId);
     const postureEmoji = settings?.posture === 'outside' ? '🚶' : '🏠';
-    const msg = `<b>⚙️ Налаштування</b>\n\n` +
-      `🌧 Поріг дощу: <b>${settings?.rain_threshold_mm || 0.5}мм</b>\n` +
-      `⏱ Вікно прогнозу: <b>${settings?.lookahead_min || 30}хв</b>\n` +
-      `📡 Радар: <b>${settings?.radar_enabled !== false ? 'Увімкнено' : 'Вимкнено'}</b>\n` +
-      `⏰ Кулдаун алертів: <b>${settings?.alert_cooldown_min || 30}хв</b>\n` +
-      `${postureEmoji} Режим: <b>${settings?.posture === 'outside' ? 'Надворі 🚶' : 'Вдома 🏠'}</b>\n\n` +
-      `🌐 Мова: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
-      `🔑 API ключі: ${keys.length}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
-    return;
-  }
-
-  if (data === 'cb_settings_detail') {
-    const u = await getUser(chatId);
-    const uLang = u?.language || 'uk';
-    const settings = await getUserSettings(chatId);
-    const keys = await getAllUserApiKeys(chatId);
-    const postureEmoji = settings?.posture === 'outside' ? '🚶' : '🏠';
-    const msg = `<b>⚙️ Налаштування</b>\n\n` +
-      `🌧 Поріг дощу: <b>${settings?.rain_threshold_mm || 0.5}мм</b>\n` +
-      `⏱ Вікно прогнозу: <b>${settings?.lookahead_min || 30}хв</b>\n` +
-      `📡 Радар: <b>${settings?.radar_enabled !== false ? 'Увімкнено' : 'Вимкнено'}</b>\n` +
-      `⏰ Кулдаун алертів: <b>${settings?.alert_cooldown_min || 30}хв</b>\n` +
-      `${postureEmoji} Режим: <b>${settings?.posture === 'outside' ? 'Надворі 🚶' : 'Вдома 🏠'}</b>\n\n` +
-      `🌐 Мова: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
-      `🔑 API ключі: ${keys.length}`;
+    const msg = `<b>${t(uLang, 'settings_title')}</b>\n\n` +
+      `🌧 ${t(uLang, 'set_rain_threshold')}: <b>${settings?.rain_threshold_mm || 0.5}${t(uLang, 'unit_mm')}</b>\n` +
+      `⏱ ${t(uLang, 'set_lookahead')}: <b>${settings?.lookahead_min || 30}${t(uLang, 'unit_min')}</b>\n` +
+      `📡 ${t(uLang, 'set_radar')}: <b>${settings?.radar_enabled !== false ? t(uLang, 'on') : t(uLang, 'off')}</b>\n` +
+      `⏰ ${t(uLang, 'set_cooldown')}: <b>${settings?.alert_cooldown_min || 30}${t(uLang, 'unit_min')}</b>\n` +
+      `${postureEmoji} ${t(uLang, 'set_mode')}: <b>${settings?.posture === 'outside' ? t(uLang, 'mode_outside') : t(uLang, 'mode_inside')}</b>\n\n` +
+      `🌐 ${t(uLang, 'language_label')}: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
+      `🔑 ${t(uLang, 'api_keys_label')}: ${keys.length}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
     return;
   }
 
   if (data === 'cb_settings_threshold') {
-    await tgAnswerCallback(callbackQuery.id, 'Оберіть поріг дощу');
+    await tgAnswerCallback(callbackQuery.id, t(lang, 'toast_select_threshold'));
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    const msg = `<b>🌧 Поріг дощу</b>\n\nМінімальна кількість опадів для сповіщення.\nЗараз: <b>${settings?.rain_threshold_mm || 0.5}мм</b>`;
+    const msg = `<b>🌧 ${t(uLang, 'set_rain_threshold')}</b>\n\n${t(uLang, 'set_threshold_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.rain_threshold_mm || 0.5}${t(uLang, 'unit_mm')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
     return;
   }
@@ -835,18 +887,18 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, `Поріг: ${value}мм`);
-    const msg = `<b>✅ Поріг дощу встановлено: ${value}мм</b>\n\nНатисніть кнопку щоб повернутись.`;
+    await tgAnswerCallback(callbackQuery.id, `${t(lang, 'toast_threshold_set')}: ${value}`);
+    const msg = `<b>${t(lang, 'settings_threshold_set', { value })}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
     return;
   }
 
   if (data === 'cb_settings_lookahead') {
-    await tgAnswerCallback(callbackQuery.id, 'Оберіть вікно прогнозу');
+    await tgAnswerCallback(callbackQuery.id, t(lang, 'toast_select_lookahead'));
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    const msg = `<b>⏱ Вікно прогнозу</b>\n\nНа скільки хвилин вперед дивитись для алертів.\nЗараз: <b>${settings?.lookahead_min || 30}хв</b>`;
+    const msg = `<b>⏱ ${t(uLang, 'set_lookahead')}</b>\n\n${t(uLang, 'set_lookahead_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.lookahead_min || 30}${t(uLang, 'unit_min')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
     return;
   }
@@ -856,8 +908,8 @@ async function handleCallbackQuery(callbackQuery) {
     await saveUserSettings(chatId, { lookahead_min: value });
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await tgAnswerCallback(callbackQuery.id, `Прогноз: ${value}хв`);
-    const msg = `<b>✅ Вікно прогнозу встановлено: ${value}хв</b>`;
+    await tgAnswerCallback(callbackQuery.id, `${t(lang, 'settings_lookahead_set')}: ${value}`);
+    const msg = `<b>${t(lang, 'settings_lookahead_set', { value })}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
     return;
   }
@@ -869,18 +921,18 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const updatedSettings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, newEnabled ? 'Радар увімкнено' : 'Радар вимкнено');
-    const msg = `<b>⚙️ Налаштування</b>\n\n📡 Радар: <b>${newEnabled ? 'Увімкнено' : 'Вимкнено'}</b>\n\nНатисніть кнопку щоб повернутись.`;
+    await tgAnswerCallback(callbackQuery.id, newEnabled ? t(lang, 'toast_radar_on') : t(lang, 'toast_radar_off'));
+    const msg = `<b>⚙️ ${t(uLang, 'set_radar')}</b>\n\n${t(uLang, 'set_radar_desc')}.\n${t(uLang, 'current_label')}: <b>${newEnabled ? t(uLang, 'on') : t(uLang, 'off')}</b>\n\n${t(uLang, 'btn_back')}.`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
     return;
   }
 
   if (data === 'cb_settings_cooldown') {
-    await tgAnswerCallback(callbackQuery.id, 'Оберіть кулдаун');
+    await tgAnswerCallback(callbackQuery.id, t(lang, 'toast_select_cooldown'));
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    const msg = `<b>⏰ Кулдаун алертів</b>\n\nМінімальний інтервал між сповіщеннями про дощ.\nЗараз: <b>${settings?.alert_cooldown_min || 30}хв</b>`;
+    const msg = `<b>⏰ ${t(uLang, 'set_cooldown')}</b>\n\n${t(uLang, 'set_cooldown_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.alert_cooldown_min || 30}${t(uLang, 'unit_min')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
     return;
   }
@@ -890,8 +942,8 @@ async function handleCallbackQuery(callbackQuery) {
     await saveUserSettings(chatId, { alert_cooldown_min: value });
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await tgAnswerCallback(callbackQuery.id, `Кулдаун: ${value}хв`);
-    const msg = `<b>✅ Кулдаун встановлено: ${value}хв</b>`;
+    await tgAnswerCallback(callbackQuery.id, `${t(lang, 'toast_select_cooldown')}: ${value}`);
+    const msg = `<b>✅ ${t(uLang, 'set_cooldown')}: ${value}${t(uLang, 'unit_min')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
     return;
   }
@@ -903,9 +955,9 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const updatedSettings = await getUserSettings(chatId);
-    const label = newPosture === 'outside' ? '🚶 Надворі' : '🏠 Вдома';
-    await tgAnswerCallback(callbackQuery.id, label);
-    const msg = `<b>✅ Режим змінено: ${label}</b>`;
+    const label = newPosture === 'outside' ? `${t(uLang, 'mode_outside')}` : `${t(uLang, 'mode_inside')}`;
+    await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'toast_mode_changed')}: ${label}`);
+    const msg = `<b>✅ ${t(uLang, 'toast_mode_changed')}: ${label}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
     return;
   }
@@ -916,7 +968,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    const msg = `<b>🔧 Розширені налаштування</b>\n\nТут можна налаштувати додаткові параметри сповіщень.`;
+    const msg = `<b>🔧 ${t(uLang, 'set_advanced')}</b>\n\n${t(uLang, 'set_posture_desc')}.`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -926,7 +978,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const qhOn = settings?.quiet_hours_start && settings?.quiet_hours_end;
-    const msg = `<b>🔕 Тихі години</b>\n\nОберіть час ПОЧАТКУ тихих годин.\nЗараз: ${qhOn ? settings.quiet_hours_start + '-' + settings.quiet_hours_end : 'Вимкнено'}`;
+    const msg = `<b>🔕 ${t(uLang, 'set_quiet_hours')}</b>\n\n${t(uLang, 'set_quiet_hours_desc')}.\n${t(uLang, 'current_label')}: ${qhOn ? settings.quiet_hours_start + '-' + settings.quiet_hours_end : t(uLang, 'off')}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: quietHoursKeyboard(uLang) });
     return;
   }
@@ -935,7 +987,7 @@ async function handleCallbackQuery(callbackQuery) {
     const startHour = parseInt(data.replace('cb_qh_start_', ''));
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>🔕 Тихі години</b>\n\nПочаток: <b>${startHour.toString().padStart(2,'0')}:00</b>\nОберіть час КІНЦЯ:`;
+    const msg = `<b>🔕 ${t(uLang, 'set_quiet_hours')}</b>\n\n${t(uLang, 'current_label')}: <b>${startHour.toString().padStart(2,'0')}:00</b>\n${t(uLang, 'set_quiet_hours_desc')}:`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: quietHoursEndKeyboard(uLang, startHour) });
     return;
   }
@@ -951,7 +1003,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, `${startStr}-${endStr}`);
-    const msg = `<b>✅ Тихі години: ${startStr} - ${endStr}</b>`;
+    const msg = `<b>✅ ${t(uLang, 'set_quiet_hours')}: ${startStr} - ${endStr}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -961,8 +1013,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, 'Тихі години вимкнено');
-    const msg = `<b>✅ Тихі години вимкнено</b>`;
+    await tgAnswerCallback(callbackQuery.id, t(uLang, 'off'));
+    const msg = `<b>✅ ${t(uLang, 'set_quiet_hours')}: ${t(uLang, 'off')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -971,7 +1023,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>💨 Поріг вітру</b>\n\nАлерт коли вітер перевищує значення.\nЗараз: ${settings?.wind_threshold_kmh ? '>'+settings.wind_threshold_kmh+'км/год' : 'Вимкнено'}`;
+    const msg = `<b>💨 ${t(uLang, 'set_wind_threshold')}</b>\n\n${t(uLang, 'set_wind_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.wind_threshold_kmh ? '>'+settings.wind_threshold_kmh+t(uLang, 'unit_kmh') : t(uLang, 'off')}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: windThresholdKeyboard(uLang) });
     return;
   }
@@ -982,8 +1034,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, val === 0 ? 'Вимкнено' : `>${val}км/год`);
-    const msg = val === 0 ? `<b>✅ Вітер: вимкнено</b>` : `<b>✅ Вітер: >${val}км/год</b>`;
+    await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : `>${val}${t(uLang, 'unit_kmh')}`);
+    const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_wind_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_wind_threshold')}: >${val}${t(uLang, 'unit_kmh')}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -992,7 +1044,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>💧 Поріг вологості</b>\n\nАлерт коли вологість перевищує значення.\nЗараз: ${settings?.humidity_threshold_pct ? '>'+settings.humidity_threshold_pct+'%' : 'Вимкнено'}`;
+    const msg = `<b>💧 ${t(uLang, 'set_humidity_threshold')}</b>\n\n${t(uLang, 'set_humidity_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.humidity_threshold_pct ? '>'+settings.humidity_threshold_pct+'%' : t(uLang, 'off')}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: humidityThresholdKeyboard(uLang) });
     return;
   }
@@ -1003,8 +1055,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, val === 0 ? 'Вимкнено' : `>${val}%`);
-    const msg = val === 0 ? `<b>✅ Вологість: вимкнено</b>` : `<b>✅ Вологість: >${val}%</b>`;
+    await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : `>${val}%`);
+    const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_humidity_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_humidity_threshold')}: >${val}%</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -1013,7 +1065,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>🌡 Поріг температури</b>\n\nАлерт коли температура нижче значення.\nЗараз: ${settings?.temp_threshold_c != null ? '<'+settings.temp_threshold_c+'°C' : 'Вимкнено'}`;
+    const msg = `<b>🌡 ${t(uLang, 'set_temp_threshold')}</b>\n\n${t(uLang, 'set_temp_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.temp_threshold_c != null ? '<'+settings.temp_threshold_c+'°C' : t(uLang, 'off')}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: tempThresholdKeyboard(uLang) });
     return;
   }
@@ -1024,8 +1076,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, val === 999 ? 'Вимкнено' : `<${val}°C`);
-    const msg = val === 999 ? `<b>✅ Температура: вимкнено</b>` : `<b>✅ Температура: <${val}°C</b>`;
+    await tgAnswerCallback(callbackQuery.id, val === 999 ? t(uLang, 'off') : `<${val}°C`);
+    const msg = val === 999 ? `<b>✅ ${t(uLang, 'set_temp_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_temp_threshold')}: <${val}°C</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
@@ -1046,8 +1098,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const updated = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, current ? 'Вимкнено' : 'Увімкнено');
-    const msg = `<b>🌩 Рівні дощу</b>\n\nОберіть які типи опадів викликатимуть сповіщення:`;
+    await tgAnswerCallback(callbackQuery.id, current ? t(uLang, 'off') : t(uLang, 'on'));
+    const msg = `<b>🌩 ${t(uLang, 'set_rain_levels')}</b>\n\n${t(uLang, 'set_rain_levels_desc')}:`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: rainLevelsKeyboard(uLang, updated) });
   };
 
@@ -1060,7 +1112,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>📊 Секції повідомлення</b>\n\nОберіть які секції показувати в повідомленні:`;
+    const msg = `<b>📊 ${t(uLang, 'set_sections')}</b>\n\n${t(uLang, 'set_sections_desc')}:`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, settings) });
     return;
   }
@@ -1072,8 +1124,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const updated = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, current ? 'Приховано' : 'Показано');
-    const msg = `<b>📊 Секції повідомлення</b>\n\nОберіть які секції показувати:`;
+    await tgAnswerCallback(callbackQuery.id, current ? t(uLang, 'btn_disable') : t(uLang, 'on'));
+    const msg = `<b>📊 ${t(uLang, 'set_sections')}</b>\n\n${t(uLang, 'set_sections_desc')}:`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, updated) });
   };
 
@@ -1088,7 +1140,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const locations = await getUserLocations(chatId);
-    const msg = `<b>📍 Локації</b>\n\nУправління вашими локаціями.\n⭐ = поточна локація`;
+    const msg = `<b>📍 ${t(uLang, 'set_locations')}</b>\n\n${t(uLang, 'set_locations_desc')}.\n⭐ = ${t(uLang, 'current_label')}`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
     return;
   }
@@ -1101,8 +1153,8 @@ async function handleCallbackQuery(callbackQuery) {
     const locations = await getUserLocations(chatId);
     const loc = locations.find(l => l.id === locId);
     await saveUser(chatId, { latitude: loc.latitude, longitude: loc.longitude });
-    await tgAnswerCallback(callbackQuery.id, `Локація: ${loc?.name}`);
-    const msg = `<b>✅ Локацію змінено: ${loc?.name}</b>`;
+    await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'location_set_default')}: ${loc?.name}`);
+    const msg = `<b>✅ ${t(uLang, 'location_set_default')}: ${loc?.name}</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
     return;
   }
@@ -1111,7 +1163,9 @@ async function handleCallbackQuery(callbackQuery) {
     const locId = parseInt(data.replace('cb_loc_delete_', ''));
     const locations = await getUserLocations(chatId);
     if (locations.length <= 1) {
-      await tgAnswerCallback(callbackQuery.id, 'Неможливо видалити останню локацію', true);
+      const u = await getUser(chatId);
+      const uLang = u?.language || 'uk';
+      await tgAnswerCallback(callbackQuery.id, t(uLang, 'location_cannot_delete_last'), true);
       return;
     }
     const loc = locations.find(l => l.id === locId);
@@ -1126,8 +1180,8 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const updatedLocations = await getUserLocations(chatId);
-    await tgAnswerCallback(callbackQuery.id, `Видалено: ${loc?.name}`);
-    const msg = `<b>🗑 Локацію "${loc?.name}" видалено</b>`;
+    await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'location_deleted')}: ${loc?.name}`);
+    const msg = `<b>🗑 ${t(uLang, 'location_deleted')}: "${loc?.name}"</b>`;
     await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, updatedLocations) });
     return;
   }
@@ -1136,15 +1190,15 @@ async function handleCallbackQuery(callbackQuery) {
     pendingCallbacks[chatId] = { action: 'location_name', messageId };
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await tgSendMessage(chatId, '📍 Надішліть назву нової локації (напр. "Робота"):', {
+    await tgSendMessage(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`, {
       reply_markup: {
-        keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+        keyboard: [[{ text: `📍 ${t(uLang, 'send_geolocation')}`, request_location: true }]],
         one_time_keyboard: true,
         resize_keyboard: true,
       },
     });
-    await tgSendMessage(chatId, 'Або введіть назву текстом:', {
-      reply_markup: { inline_keyboard: [[{ text: '◀ Назад', callback_data: 'cb_adv_locations' }]] },
+    await tgSendMessage(chatId, `${t(uLang, 'location_add_prompt')}:`, {
+      reply_markup: { inline_keyboard: [[{ text: t(uLang, 'btn_back'), callback_data: 'cb_adv_locations' }]] },
     });
     return;
   }
@@ -1179,14 +1233,14 @@ async function handleCallbackQuery(callbackQuery) {
 
   if (data === 'cb_lang') {
     const msg = `<b>${t(lang, 'language_title')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(0) });
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(0, lang) });
     return;
   }
 
   if (data.startsWith('cb_lang_page_')) {
     const page = parseInt(data.replace('cb_lang_page_', ''));
     const msg = `<b>${t(lang, 'language_title')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(page) });
+    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(page, lang) });
     return;
   }
 
@@ -1228,7 +1282,7 @@ async function handleMessage(message) {
     await saveUser(chatId, { enabled: false });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, t(lang, 'btn_stop') || 'Сповіщення вимкнено.', { reply_markup: mainMenuKeyboard(lang) });
+    await tgSendMessage(chatId, t(lang, 'btn_stop') || t(lang, 'notifications_disabled'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1236,7 +1290,7 @@ async function handleMessage(message) {
     await saveUserSettings(chatId, { posture: 'inside' });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, '🏠 Режим: <b>Вдома</b>\n\nПоради з урахуванням того, що ви вдома.', { reply_markup: mainMenuKeyboard(lang) });
+    await tgSendMessage(chatId, t(lang, 'mode_inside_msg'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1244,7 +1298,7 @@ async function handleMessage(message) {
     await saveUserSettings(chatId, { posture: 'outside' });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, '🚶 Режим: <b>Надворі</b>\n\nПоради з урахуванням того, що ви надворі.', { reply_markup: mainMenuKeyboard(lang) });
+    await tgSendMessage(chatId, t(lang, 'mode_outside_msg'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1307,30 +1361,29 @@ async function handleMessage(message) {
 
   // Handle pending location name for multi-location
   if (pendingCallbacks[chatId]?.action === 'location_name') {
-    // If user sends location directly (not a name), use default name
+    const user = await getUser(chatId);
+    const lang = user?.language || 'uk';
     if (message.location) {
       const lat = message.location.latitude;
       const lon = message.location.longitude;
       delete pendingCallbacks[chatId];
-      await addUserLocation(chatId, 'Локація', lat, lon);
-      const user = await getUser(chatId);
-      const lang = user?.language || 'uk';
+      await addUserLocation(chatId, t(lang, 'set_locations'), lat, lon);
       const locations = await getUserLocations(chatId);
-      await tgSendMessage(chatId, `✅ Локацію додано!`, {
+      await tgSendMessage(chatId, t(lang, 'location_saved_success'), {
         reply_markup: { remove_keyboard: true },
       });
-      await tgSendMessage(chatId, `📍 Ваши локації:`, { reply_markup: locationsKeyboard(lang, locations) });
+      await tgSendMessage(chatId, `${t(lang, 'your_locations')}`, { reply_markup: locationsKeyboard(lang, locations) });
       return;
     }
     const locName = text?.trim();
     if (!locName || locName.length > 50) {
-      await tgSendMessage(chatId, '❌ Назва занадто довга (макс 50 символів). Спробуйте ще:');
+      await tgSendMessage(chatId, t(lang, 'name_too_long'));
       return;
     }
     pendingCallbacks[chatId] = { action: 'location_coords', name: locName, messageId: pendingCallbacks[chatId].messageId };
-    await tgSendMessage(chatId, `📍 Тепер надішліть геолокацію для "${locName}" або введіть координати:`, {
+    await tgSendMessage(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`, {
       reply_markup: {
-        keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+        keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
         one_time_keyboard: true,
         resize_keyboard: true,
       },
@@ -1342,6 +1395,8 @@ async function handleMessage(message) {
   if (pendingCallbacks[chatId]?.action === 'location_coords') {
     const { name } = pendingCallbacks[chatId];
     delete pendingCallbacks[chatId];
+    const user = await getUser(chatId);
+    const lang = user?.language || 'uk';
 
     let lat, lon;
     if (message.location) {
@@ -1356,9 +1411,9 @@ async function handleMessage(message) {
     }
 
     if (lat == null || lon == null) {
-      await tgSendMessage(chatId, '❌ Невірний формат. Надішліть геолокацію або координати (49.825,23.951):', {
+      await tgSendMessage(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`, {
         reply_markup: {
-          keyboard: [[{ text: '📍 Надіслати геолокацію', request_location: true }]],
+          keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
           one_time_keyboard: true,
           resize_keyboard: true,
         },
@@ -1367,13 +1422,13 @@ async function handleMessage(message) {
     }
 
     await addUserLocation(chatId, name, lat, lon);
-    const user = await getUser(chatId);
-    const lang = user?.language || 'uk';
+    const user2 = await getUser(chatId);
+    const lang2 = user2?.language || 'uk';
     const locations = await getUserLocations(chatId);
-    await tgSendMessage(chatId, `✅ Локацію "${name}" додано!`, {
+    await tgSendMessage(chatId, `✅ ${t(lang2, 'location_saved_success')} "${name}"`, {
       reply_markup: { remove_keyboard: true },
     });
-    await tgSendMessage(chatId, `📍 Ваши локації:`, { reply_markup: locationsKeyboard(lang, locations) });
+    await tgSendMessage(chatId, `${t(lang2, 'your_locations')}`, { reply_markup: locationsKeyboard(lang2, locations) });
     return;
   }
 
