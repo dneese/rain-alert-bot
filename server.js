@@ -38,6 +38,27 @@ async function tgSetWebhook(url) {
   return tgApi('setWebhook', { url, allowed_updates: ['message', 'callback_query'] });
 }
 
+// === Rich Message helpers with fallback ===
+async function tgSendRichMessage(chatId, richMessage, options = {}) {
+  return tgApi('sendRichMessage', { chat_id: chatId, rich_message: richMessage, ...options });
+}
+
+async function tgEditRichMessage(chatId, messageId, richMessage, options = {}) {
+  return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, rich_message: richMessage, ...options });
+}
+
+async function sendWithFallback(chatId, html, options = {}) {
+  const richResult = await tgSendRichMessage(chatId, { html }, options);
+  if (richResult.ok) return richResult;
+  return tgSendMessage(chatId, html, options);
+}
+
+async function editWithFallback(chatId, messageId, html, options = {}) {
+  const richResult = await tgEditRichMessage(chatId, messageId, { html }, options);
+  if (richResult.ok) return richResult;
+  return tgEditMessage(chatId, messageId, html, options);
+}
+
 // === Keyboards ===
 function mainMenuKeyboard(lang) {
   return {
@@ -584,12 +605,13 @@ async function getRainForecast(lat, lon, chatId) {
 }
 
 // === Weather Display ===
-function getWeatherEmoji(probability, precipMm) {
+function getWeatherEmoji(probability, precipMm, wmoCode) {
   if (precipMm > 2) return '🌧';
   if (precipMm > 0.5) return '🌧';
   if (precipMm > 0.1) return '🌦';
   if (probability > 60) return '🌧';
   if (probability > 30) return '⛅';
+  if (wmoCode != null && WMO_CODES[wmoCode]) return WMO_CODES[wmoCode].icon;
   return '☀️';
 }
 
@@ -634,10 +656,9 @@ function formatWeatherMessage(weatherData, lang, settings) {
   const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
   if (!current && (!forecast || forecast.length === 0)) {
-    return `<b>${t(lang, 'error_no_forecast')}</b>`;
+    return `<h3>${t(lang, 'error_no_forecast')}</h3>`;
   }
 
-  // Get current time string in local timezone for display
   const nowLocalDate = new Date(Date.now() + (tzOffsetMs || 0));
   const nowTimeStr = `${nowLocalDate.getUTCHours().toString().padStart(2, '0')}:${nowLocalDate.getUTCMinutes().toString().padStart(2, '0')}`;
 
@@ -647,82 +668,82 @@ function formatWeatherMessage(weatherData, lang, settings) {
   if (isRaining) {
     const rainMm = current?.precipitation_mm || 0;
     const intensity = rainMm > 3 ? `⚠️ ${t(lang, 'alert_strong_rain')}` : rainMm > 1 ? `🌧 ${t(lang, 'alert_rain')}` : `🌦 ${t(lang, 'alert_light_rain')}`;
-    msg += `<b>${intensity}</b>\n\n`;
+    msg += `<h3>${intensity}</h3>`;
   } else {
     const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
       const minsAway = Math.round((nextRain.ms - nowLocalMs) / 60000);
-      msg += `<b>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</b>\n\n`;
+      msg += `<h3>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</h3>`;
     } else {
       const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
         const hoursAway = Math.round((rainInForecast.ms - nowLocalMs) / (1000 * 60 * 60));
-        msg += `<b>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</b>\n\n`;
+        msg += `<h3>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</h3>`;
       } else {
-        msg += `<b>☀️ ${t(lang, 'no_rain_header')}</b>\n\n`;
+        msg += `<h3>☀️ ${t(lang, 'no_rain_header')}</h3>`;
       }
     }
   }
 
-  // === CURRENT CONDITIONS ===
+  // === CURRENT CONDITIONS (table) ===
   if (current && settings?.show_current !== false) {
     const rainIcon = current.is_raining ? '🌧' : current.weather_icon;
-    msg += `<b>${t(lang, 'current_label')}:</b> ${rainIcon} ${Math.round(current.temp_c)}°C\n`;
-    msg += `💧 ${Math.round(current.humidity)}%  💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}\n`;
+    msg += `<table bordered striped><tr><th>${t(lang, 'current_label')}</th><th></th></tr>`;
+    msg += `<tr><td>${rainIcon} ${Math.round(current.temp_c)}°C</td><td>💧 ${Math.round(current.humidity)}%</td></tr>`;
+    msg += `<tr><td>💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}</td>`;
     if (current.precipitation_mm > 0) {
-      msg += `🌧 ${t(lang, 'precip_label')}: ${current.precipitation_mm}${t(lang, 'unit_mm')}\n`;
+      msg += `<td>🌧 ${current.precipitation_mm}${t(lang, 'unit_mm')}</td></tr>`;
+    } else {
+      msg += `<td></td></tr>`;
     }
-    if (radar?.is_raining && settings?.show_radar !== false) {
+    if (radar?.is_raining && isRaining && settings?.show_radar !== false) {
       const radarDesc = ['', t(lang, 'radar_weak'), t(lang, 'radar_moderate'), t(lang, 'radar_strong'), t(lang, 'radar_very_strong'), t(lang, 'radar_extreme')];
-      msg += `📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})\n`;
+      msg += `<tr><td colspan="2">📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})</td></tr>`;
     }
-    msg += '\n';
+    msg += `</table>`;
   }
 
-  // === MINUTELY (next 2 hours, most accurate) ===
+  // === MINUTELY (collapsible) ===
   if (minutely && minutely.length > 0 && settings?.show_minutely !== false) {
-    msg += `<b>${t(lang, 'minutely_label')}:</b>\n`;
     const displayMinutely = minutely.slice(0, 8);
+    let minutelyContent = '';
     for (const m of displayMinutely) {
       const time = m.timeStr.split('T')[1];
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
       const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      msg += `<code>${time} ${emoji} ${bar}${precip}</code>\n`;
+      minutelyContent += `<p><code>${time} ${emoji} ${bar}${precip}</code></p>`;
     }
-    msg += '\n';
+    msg += `<details><summary>${t(lang, 'minutely_label')}</summary>${minutelyContent}</details>`;
   }
 
-  // === HOURLY FORECAST ===
+  // === HOURLY FORECAST (collapsible) ===
   if (forecast && forecast.length > 0 && settings?.show_hourly !== false) {
-    msg += `<b>${t(lang, 'forecast_label')}:</b>\n`;
     const displayHours = forecast.slice(0, 8);
+    let hourlyContent = '';
     let lastDate = '';
     for (const h of displayHours) {
       const dateStr = formatDate(h.timeStr, lang, tzOffsetMs);
       if (dateStr !== lastDate) {
-        msg += `<i>${dateStr}</i>\n`;
+        hourlyContent += `<p><i>${dateStr}</i></p>`;
         lastDate = dateStr;
       }
       const time = h.timeStr.split('T')[1];
-      const emoji = getWeatherEmoji(h.probability, h.precip_mm);
+      const emoji = getWeatherEmoji(h.probability, h.precip_mm, h.wmo_code);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      msg += `<code>${time} ${emoji} ${h.probability}% ${temp}${precip}</code>\n`;
+      hourlyContent += `<p><code>${time} ${emoji} ${h.probability}% ${temp}${precip}</code></p>`;
     }
-    msg += '\n';
+    msg += `<details><summary>${t(lang, 'forecast_label')}</summary>${hourlyContent}</details>`;
   }
 
-  // === RECOMMENDATION ===
+  // === RECOMMENDATION (blockquote) ===
   const posture = settings?.posture || 'inside';
   const isOutside = posture === 'outside';
+  let recText = '';
 
   if (isRaining) {
-    if (isOutside) {
-      msg += `⚠️ <b>${t(lang, 'rec_rain_outside')}</b>\n`;
-    } else {
-      msg += `⚠️ <b>${t(lang, 'rec_rain_inside')}</b>\n`;
-    }
+    recText = isOutside ? t(lang, 'rec_rain_outside') : t(lang, 'rec_rain_inside');
   } else {
     const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
@@ -743,32 +764,18 @@ function formatWeatherMessage(weatherData, lang, settings) {
       }
 
       if (minsAway <= 30) {
-        if (isOutside) {
-          msg += `🔴 <b>${t(lang, 'rec_urgent_outside', { time: timeStr })}</b>\n`;
-        } else {
-          msg += `🟡 <b>${t(lang, 'rec_urgent_inside', { time: timeStr })}</b>\n`;
-        }
+        recText = isOutside ? t(lang, 'rec_urgent_outside', { time: timeStr }) : t(lang, 'rec_urgent_inside', { time: timeStr });
       } else if (minsAway <= 120) {
-        if (isOutside) {
-          msg += `🟡 <b>${t(lang, 'rec_moderate_outside', { time: timeStr })}</b>\n`;
-        } else {
-          msg += `🟡 <b>${t(lang, 'rec_moderate_inside', { time: timeStr })}</b>\n`;
-        }
+        recText = isOutside ? t(lang, 'rec_moderate_outside', { time: timeStr }) : t(lang, 'rec_moderate_inside', { time: timeStr });
       } else {
-        if (isOutside) {
-          msg += `ℹ️ <b>${t(lang, 'rec_far_outside', { time: timeStr })}</b>\n`;
-        } else {
-          msg += `ℹ️ <b>${t(lang, 'rec_far_inside', { time: timeStr })}</b>\n`;
-        }
+        recText = isOutside ? t(lang, 'rec_far_outside', { time: timeStr }) : t(lang, 'rec_far_inside', { time: timeStr });
       }
     } else {
-      if (isOutside) {
-        msg += `✅ <b>${t(lang, 'rec_no_rain_outside')}</b>\n`;
-      } else {
-        msg += `✅ <b>${t(lang, 'rec_no_rain_inside')}</b>\n`;
-      }
+      recText = isOutside ? t(lang, 'rec_no_rain_outside') : t(lang, 'rec_no_rain_inside');
     }
   }
+  const recEmoji = isRaining ? '⚠️' : (recText === (isOutside ? t(lang, 'rec_no_rain_outside') : t(lang, 'rec_no_rain_inside')) ? '✅' : '🟡');
+  msg += `<blockquote>${recEmoji} <b>${recText}</b></blockquote>`;
 
   // === SEVERE WEATHER WARNINGS ===
   const hasSevereCurrent = current && WMO_CODES[current.weather_code]?.severe;
@@ -777,14 +784,14 @@ function formatWeatherMessage(weatherData, lang, settings) {
   const hasHailSoon = forecast?.some(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs && f.ms < nowLocalMs + 120 * 60 * 1000);
 
   if (hasSevereCurrent || hasSevereForecast || hasHailNow || hasHailSoon) {
-    msg += `\n🚨 <b>${t(lang, 'severe_title')}:</b>\n`;
+    msg += `<h5>🚨 ${t(lang, 'severe_title')}</h5>`;
     if (hasHailNow) {
-      msg += `⛈ <b>${t(lang, 'severe_hail_now')}</b>\n`;
-      msg += `${t(lang, 'severe_hail_shelter')}\n`;
+      msg += `<p>⛈ <b>${t(lang, 'severe_hail_now')}</b></p>`;
+      msg += `<p>${t(lang, 'severe_hail_shelter')}</p>`;
     } else if (hasSevereCurrent) {
       const sevDesc = t(lang, 'wmo_' + current.weather_code) || WMO_CODES[current.weather_code]?.desc || '';
-      msg += `⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b>\n`;
-      msg += `${t(lang, 'severe_wait_shelter')}\n`;
+      msg += `<p>⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b></p>`;
+      msg += `<p>${t(lang, 'severe_wait_shelter')}</p>`;
     }
     if (hasHailSoon && !hasHailNow) {
       const hailTime = forecast.find(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs);
@@ -792,8 +799,8 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const hailMins = Math.round((hailTime.ms - nowLocalMs) / 60000);
         const hailHrs = Math.round(hailMins / 60);
         const hailETA = hailMins < 60 ? t(lang, 'eta_minutes', { minutes: hailMins }) : t(lang, 'eta_hours', { hours: hailHrs });
-        msg += `⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b>\n`;
-        msg += `${t(lang, 'severe_hail_prepare')}\n`;
+        msg += `<p>⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b></p>`;
+        msg += `<p>${t(lang, 'severe_hail_prepare')}</p>`;
       }
     } else if (hasSevereForecast && !hasSevereCurrent) {
       const sevTime = forecast.find(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs);
@@ -801,16 +808,17 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const sevMins = Math.round((sevTime.ms - nowLocalMs) / 60000);
         const sevHrs = Math.round(sevMins / 60);
         const sevETA = sevMins < 60 ? t(lang, 'eta_minutes', { minutes: sevMins }) : t(lang, 'eta_hours', { hours: sevHrs });
-        msg += `⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b>\n`;
-        msg += `${t(lang, 'severe_prepare_shelter')}\n`;
+        msg += `<p>⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b></p>`;
+        msg += `<p>${t(lang, 'severe_prepare_shelter')}</p>`;
       }
     }
-    msg += '\n';
   }
 
-  msg += `\n🕐 ${t(lang, 'updated_at', { time: nowTimeStr })}`;
-  if (source) msg += ` | ${source}`;
-  if (radar?.is_raining && isRaining) msg += ` | 📡 Radar`;
+  // === FOOTER ===
+  let footerParts = [`🕐 ${t(lang, 'updated_at', { time: nowTimeStr })}`];
+  if (source) footerParts.push(source);
+  if (radar?.is_raining && isRaining) footerParts.push('📡 Radar');
+  msg += `<footer>${footerParts.join(' | ')}</footer>`;
 
   return msg;
 }
@@ -831,7 +839,7 @@ async function handleCallbackQuery(callbackQuery) {
   await tgAnswerCallback(callbackQuery.id);
 
   if (data === 'cb_location') {
-    await tgSendMessage(chatId, t(lang, 'send_location_prompt'), {
+    await sendWithFallback(chatId, t(lang, 'send_location_prompt'), {
       reply_markup: { remove_keyboard: true },
     });
     return;
@@ -840,13 +848,13 @@ async function handleCallbackQuery(callbackQuery) {
   if (data === 'cb_check') {
     const u = await getUser(chatId);
     if (!u || !u.latitude) {
-      await tgSendMessage(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
+      await sendWithFallback(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
       return;
     }
     const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
     const settings = await getUserSettings(chatId);
     const msg = formatWeatherMessage(weatherData, lang, settings);
-    const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -867,7 +875,7 @@ async function handleCallbackQuery(callbackQuery) {
       `${postureEmoji} ${t(uLang, 'set_mode')}: <b>${settings?.posture === 'outside' ? t(uLang, 'mode_outside') : t(uLang, 'mode_inside')}</b>\n\n` +
       `🌐 ${t(uLang, 'language_label')}: ${getLangFlag(uLang)} ${getLangName(uLang)}\n` +
       `🔑 ${t(uLang, 'api_keys_label')}: ${keys.length}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, settings) });
     return;
   }
 
@@ -877,7 +885,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     const msg = `<b>🌧 ${t(uLang, 'set_rain_threshold')}</b>\n\n${t(uLang, 'set_threshold_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.rain_threshold_mm || 0.5}${t(uLang, 'unit_mm')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
     return;
   }
 
@@ -889,7 +897,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, `${t(lang, 'toast_threshold_set')}: ${value}`);
     const msg = `<b>${t(lang, 'settings_threshold_set', { value })}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: thresholdKeyboard(uLang) });
     return;
   }
 
@@ -899,7 +907,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     const msg = `<b>⏱ ${t(uLang, 'set_lookahead')}</b>\n\n${t(uLang, 'set_lookahead_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.lookahead_min || 30}${t(uLang, 'unit_min')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
     return;
   }
 
@@ -910,7 +918,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     await tgAnswerCallback(callbackQuery.id, `${t(lang, 'settings_lookahead_set')}: ${value}`);
     const msg = `<b>${t(lang, 'settings_lookahead_set', { value })}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: lookaheadKeyboard(uLang) });
     return;
   }
 
@@ -923,7 +931,7 @@ async function handleCallbackQuery(callbackQuery) {
     const updatedSettings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, newEnabled ? t(lang, 'toast_radar_on') : t(lang, 'toast_radar_off'));
     const msg = `<b>⚙️ ${t(uLang, 'set_radar')}</b>\n\n${t(uLang, 'set_radar_desc')}.\n${t(uLang, 'current_label')}: <b>${newEnabled ? t(uLang, 'on') : t(uLang, 'off')}</b>\n\n${t(uLang, 'btn_back')}.`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
     return;
   }
 
@@ -933,7 +941,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     const msg = `<b>⏰ ${t(uLang, 'set_cooldown')}</b>\n\n${t(uLang, 'set_cooldown_desc')}.\n${t(uLang, 'current_label')}: <b>${settings?.alert_cooldown_min || 30}${t(uLang, 'unit_min')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
     return;
   }
 
@@ -944,7 +952,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     await tgAnswerCallback(callbackQuery.id, `${t(lang, 'toast_select_cooldown')}: ${value}`);
     const msg = `<b>✅ ${t(uLang, 'set_cooldown')}: ${value}${t(uLang, 'unit_min')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: cooldownKeyboard(uLang) });
     return;
   }
 
@@ -958,7 +966,7 @@ async function handleCallbackQuery(callbackQuery) {
     const label = newPosture === 'outside' ? `${t(uLang, 'mode_outside')}` : `${t(uLang, 'mode_inside')}`;
     await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'toast_mode_changed')}: ${label}`);
     const msg = `<b>✅ ${t(uLang, 'toast_mode_changed')}: ${label}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: settingsDetailKeyboard(uLang, updatedSettings) });
     return;
   }
 
@@ -969,7 +977,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const settings = await getUserSettings(chatId);
     const msg = `<b>🔧 ${t(uLang, 'set_advanced')}</b>\n\n${t(uLang, 'set_posture_desc')}.`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -979,7 +987,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const qhOn = settings?.quiet_hours_start && settings?.quiet_hours_end;
     const msg = `<b>🔕 ${t(uLang, 'set_quiet_hours')}</b>\n\n${t(uLang, 'set_quiet_hours_desc')}.\n${t(uLang, 'current_label')}: ${qhOn ? settings.quiet_hours_start + '-' + settings.quiet_hours_end : t(uLang, 'off')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: quietHoursKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: quietHoursKeyboard(uLang) });
     return;
   }
 
@@ -988,7 +996,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const msg = `<b>🔕 ${t(uLang, 'set_quiet_hours')}</b>\n\n${t(uLang, 'current_label')}: <b>${startHour.toString().padStart(2,'0')}:00</b>\n${t(uLang, 'set_quiet_hours_desc')}:`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: quietHoursEndKeyboard(uLang, startHour) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: quietHoursEndKeyboard(uLang, startHour) });
     return;
   }
 
@@ -1004,7 +1012,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, `${startStr}-${endStr}`);
     const msg = `<b>✅ ${t(uLang, 'set_quiet_hours')}: ${startStr} - ${endStr}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1015,7 +1023,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, t(uLang, 'off'));
     const msg = `<b>✅ ${t(uLang, 'set_quiet_hours')}: ${t(uLang, 'off')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1024,7 +1032,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const msg = `<b>💨 ${t(uLang, 'set_wind_threshold')}</b>\n\n${t(uLang, 'set_wind_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.wind_threshold_kmh ? '>'+settings.wind_threshold_kmh+t(uLang, 'unit_kmh') : t(uLang, 'off')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: windThresholdKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: windThresholdKeyboard(uLang) });
     return;
   }
 
@@ -1036,7 +1044,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : `>${val}${t(uLang, 'unit_kmh')}`);
     const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_wind_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_wind_threshold')}: >${val}${t(uLang, 'unit_kmh')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1045,7 +1053,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const msg = `<b>💧 ${t(uLang, 'set_humidity_threshold')}</b>\n\n${t(uLang, 'set_humidity_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.humidity_threshold_pct ? '>'+settings.humidity_threshold_pct+'%' : t(uLang, 'off')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: humidityThresholdKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: humidityThresholdKeyboard(uLang) });
     return;
   }
 
@@ -1057,7 +1065,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : `>${val}%`);
     const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_humidity_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_humidity_threshold')}: >${val}%</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1066,7 +1074,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const msg = `<b>🌡 ${t(uLang, 'set_temp_threshold')}</b>\n\n${t(uLang, 'set_temp_threshold_desc')}.\n${t(uLang, 'current_label')}: ${settings?.temp_threshold_c != null ? '<'+settings.temp_threshold_c+'°C' : t(uLang, 'off')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: tempThresholdKeyboard(uLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: tempThresholdKeyboard(uLang) });
     return;
   }
 
@@ -1078,7 +1086,7 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, val === 999 ? t(uLang, 'off') : `<${val}°C`);
     const msg = val === 999 ? `<b>✅ ${t(uLang, 'set_temp_threshold')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_temp_threshold')}: <${val}°C</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1086,8 +1094,8 @@ async function handleCallbackQuery(callbackQuery) {
     const settings = await getUserSettings(chatId);
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    const msg = `<b>🌩 Рівні дощу</b>\n\nОберіть які типи опадів викликатимуть сповіщення:`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: rainLevelsKeyboard(uLang, settings) });
+    const msg = `<b>🌩 ${t(uLang, 'set_rain_levels')}</b>\n\n${t(uLang, 'set_rain_levels_desc')}:`;
+    await editWithFallback(chatId, messageId, msg, { reply_markup: rainLevelsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1100,7 +1108,7 @@ async function handleCallbackQuery(callbackQuery) {
     const updated = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, current ? t(uLang, 'off') : t(uLang, 'on'));
     const msg = `<b>🌩 ${t(uLang, 'set_rain_levels')}</b>\n\n${t(uLang, 'set_rain_levels_desc')}:`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: rainLevelsKeyboard(uLang, updated) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: rainLevelsKeyboard(uLang, updated) });
   };
 
   if (data === 'cb_toggle_drizzle') { await toggleRainLevel('alert_drizzle'); return; }
@@ -1113,7 +1121,7 @@ async function handleCallbackQuery(callbackQuery) {
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
     const msg = `<b>📊 ${t(uLang, 'set_sections')}</b>\n\n${t(uLang, 'set_sections_desc')}:`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, settings) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, settings) });
     return;
   }
 
@@ -1126,7 +1134,7 @@ async function handleCallbackQuery(callbackQuery) {
     const updated = await getUserSettings(chatId);
     await tgAnswerCallback(callbackQuery.id, current ? t(uLang, 'btn_disable') : t(uLang, 'on'));
     const msg = `<b>📊 ${t(uLang, 'set_sections')}</b>\n\n${t(uLang, 'set_sections_desc')}:`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, updated) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: sectionsKeyboard(uLang, updated) });
   };
 
   if (data === 'cb_toggle_current') { await toggleSection('show_current'); return; }
@@ -1141,7 +1149,7 @@ async function handleCallbackQuery(callbackQuery) {
     const uLang = u?.language || 'uk';
     const locations = await getUserLocations(chatId);
     const msg = `<b>📍 ${t(uLang, 'set_locations')}</b>\n\n${t(uLang, 'set_locations_desc')}.\n⭐ = ${t(uLang, 'current_label')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
     return;
   }
 
@@ -1155,7 +1163,7 @@ async function handleCallbackQuery(callbackQuery) {
     await saveUser(chatId, { latitude: loc.latitude, longitude: loc.longitude });
     await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'location_set_default')}: ${loc?.name}`);
     const msg = `<b>✅ ${t(uLang, 'location_set_default')}: ${loc?.name}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, locations) });
     return;
   }
 
@@ -1182,7 +1190,7 @@ async function handleCallbackQuery(callbackQuery) {
     const updatedLocations = await getUserLocations(chatId);
     await tgAnswerCallback(callbackQuery.id, `${t(uLang, 'location_deleted')}: ${loc?.name}`);
     const msg = `<b>🗑 ${t(uLang, 'location_deleted')}: "${loc?.name}"</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, updatedLocations) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: locationsKeyboard(uLang, updatedLocations) });
     return;
   }
 
@@ -1190,14 +1198,14 @@ async function handleCallbackQuery(callbackQuery) {
     pendingCallbacks[chatId] = { action: 'location_name', messageId };
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await tgSendMessage(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`, {
+    await sendWithFallback(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`, {
       reply_markup: {
         keyboard: [[{ text: `📍 ${t(uLang, 'send_geolocation')}`, request_location: true }]],
         one_time_keyboard: true,
         resize_keyboard: true,
       },
     });
-    await tgSendMessage(chatId, `${t(uLang, 'location_add_prompt')}:`, {
+    await sendWithFallback(chatId, `${t(uLang, 'location_add_prompt')}:`, {
       reply_markup: { inline_keyboard: [[{ text: t(uLang, 'btn_back'), callback_data: 'cb_adv_locations' }]] },
     });
     return;
@@ -1207,7 +1215,7 @@ async function handleCallbackQuery(callbackQuery) {
     const keys = await getAllUserApiKeys(chatId);
     const activeProviders = keys.map(k => k.provider);
     const msg = `<b>${t(lang, 'api_keys_title')}</b>\n\n${t(lang, 'api_keys_desc')}\n\n${t(lang, 'api_register_hint')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
     return;
   }
 
@@ -1221,10 +1229,10 @@ async function handleCallbackQuery(callbackQuery) {
       await deleteUserApiKey(chatId, provider);
       const keys = await getAllUserApiKeys(chatId);
       const activeProviders = keys.map(k => k.provider);
-      await tgSendMessage(chatId, `${t(lang, 'api_key_deleted')} ${providerName}`, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
+      await sendWithFallback(chatId, `${t(lang, 'api_key_deleted')} ${providerName}`, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
     } else {
       pendingCallbacks[chatId] = { action: 'api_key', provider, messageId };
-      await tgSendMessage(chatId, t(lang, 'api_enter_key', { provider: providerName }), {
+      await sendWithFallback(chatId, t(lang, 'api_enter_key', { provider: providerName }), {
         reply_markup: confirmKeyKeyboard(lang, provider),
       });
     }
@@ -1233,14 +1241,14 @@ async function handleCallbackQuery(callbackQuery) {
 
   if (data === 'cb_lang') {
     const msg = `<b>${t(lang, 'language_title')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(0, lang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: languageKeyboard(0, lang) });
     return;
   }
 
   if (data.startsWith('cb_lang_page_')) {
     const page = parseInt(data.replace('cb_lang_page_', ''));
     const msg = `<b>${t(lang, 'language_title')}</b>`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: languageKeyboard(page, lang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: languageKeyboard(page, lang) });
     return;
   }
 
@@ -1248,13 +1256,13 @@ async function handleCallbackQuery(callbackQuery) {
     const newLang = data.replace('cb_lang_', '');
     await saveUser(chatId, { language: newLang });
     const msg = `<b>${t(newLang, 'settings_title')}</b>\n\n${t(newLang, 'settings_language_changed', { language: `${getLangFlag(newLang)} ${getLangName(newLang)}` })}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: settingsKeyboard(newLang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: settingsKeyboard(newLang) });
     return;
   }
 
   if (data === 'cb_back_main') {
     const msg = `<b>${t(lang, 'welcome')}</b>\n\n${t(lang, 'subtitle')}`;
-    await tgEditMessage(chatId, messageId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    await editWithFallback(chatId, messageId, msg, { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 }
@@ -1271,7 +1279,7 @@ async function handleMessage(message) {
       user = await getUser(chatId);
     }
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId,
+    await sendWithFallback(chatId,
       `<b>${t(lang, 'welcome')}</b>\n\n${t(lang, 'subtitle')}`,
       { reply_markup: mainMenuKeyboard(lang) }
     );
@@ -1282,7 +1290,7 @@ async function handleMessage(message) {
     await saveUser(chatId, { enabled: false });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, t(lang, 'btn_stop') || t(lang, 'notifications_disabled'), { reply_markup: mainMenuKeyboard(lang) });
+    await sendWithFallback(chatId, t(lang, 'btn_stop') || t(lang, 'notifications_disabled'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1290,7 +1298,7 @@ async function handleMessage(message) {
     await saveUserSettings(chatId, { posture: 'inside' });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, t(lang, 'mode_inside_msg'), { reply_markup: mainMenuKeyboard(lang) });
+    await sendWithFallback(chatId, t(lang, 'mode_inside_msg'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1298,7 +1306,7 @@ async function handleMessage(message) {
     await saveUserSettings(chatId, { posture: 'outside' });
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
-    await tgSendMessage(chatId, t(lang, 'mode_outside_msg'), { reply_markup: mainMenuKeyboard(lang) });
+    await sendWithFallback(chatId, t(lang, 'mode_outside_msg'), { reply_markup: mainMenuKeyboard(lang) });
     return;
   }
 
@@ -1306,13 +1314,13 @@ async function handleMessage(message) {
     const user = await getUser(chatId);
     const lang = user?.language || 'uk';
     if (!user || !user.latitude) {
-      await tgSendMessage(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
+      await sendWithFallback(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
       return;
     }
     const weatherData = await getRainForecast(user.latitude, user.longitude, chatId);
     const settings = await getUserSettings(chatId);
     const msg = formatWeatherMessage(weatherData, lang, settings);
-    const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -1330,7 +1338,7 @@ async function handleMessage(message) {
     const weatherData = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
     const settings = await getUserSettings(chatId);
     const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(weatherData, lang, settings)}`;
-    const result = await tgSendMessage(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -1348,14 +1356,14 @@ async function handleMessage(message) {
     const providerName = providerNames[provider] || provider;
 
     if (!text || text.length < 10) {
-      await tgSendMessage(chatId, t(lang, 'api_key_too_short'), { reply_markup: mainMenuKeyboard(lang) });
+      await sendWithFallback(chatId, t(lang, 'api_key_too_short'), { reply_markup: mainMenuKeyboard(lang) });
       return;
     }
 
     await saveUserApiKey(chatId, provider, text.trim());
     const keys = await getAllUserApiKeys(chatId);
     const activeProviders = keys.map(k => k.provider);
-    await tgSendMessage(chatId, `${t(lang, 'api_key_saved')} ${providerName}`, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
+    await sendWithFallback(chatId, `${t(lang, 'api_key_saved')} ${providerName}`, { reply_markup: apiKeysKeyboard(lang, activeProviders) });
     return;
   }
 
@@ -1369,19 +1377,19 @@ async function handleMessage(message) {
       delete pendingCallbacks[chatId];
       await addUserLocation(chatId, t(lang, 'set_locations'), lat, lon);
       const locations = await getUserLocations(chatId);
-      await tgSendMessage(chatId, t(lang, 'location_saved_success'), {
+      await sendWithFallback(chatId, t(lang, 'location_saved_success'), {
         reply_markup: { remove_keyboard: true },
       });
-      await tgSendMessage(chatId, `${t(lang, 'your_locations')}`, { reply_markup: locationsKeyboard(lang, locations) });
+      await sendWithFallback(chatId, `${t(lang, 'your_locations')}`, { reply_markup: locationsKeyboard(lang, locations) });
       return;
     }
     const locName = text?.trim();
     if (!locName || locName.length > 50) {
-      await tgSendMessage(chatId, t(lang, 'name_too_long'));
+      await sendWithFallback(chatId, t(lang, 'name_too_long'));
       return;
     }
     pendingCallbacks[chatId] = { action: 'location_coords', name: locName, messageId: pendingCallbacks[chatId].messageId };
-    await tgSendMessage(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`, {
+    await sendWithFallback(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`, {
       reply_markup: {
         keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
         one_time_keyboard: true,
@@ -1411,7 +1419,7 @@ async function handleMessage(message) {
     }
 
     if (lat == null || lon == null) {
-      await tgSendMessage(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`, {
+      await sendWithFallback(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`, {
         reply_markup: {
           keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
           one_time_keyboard: true,
@@ -1425,16 +1433,16 @@ async function handleMessage(message) {
     const user2 = await getUser(chatId);
     const lang2 = user2?.language || 'uk';
     const locations = await getUserLocations(chatId);
-    await tgSendMessage(chatId, `✅ ${t(lang2, 'location_saved_success')} "${name}"`, {
+    await sendWithFallback(chatId, `✅ ${t(lang2, 'location_saved_success')} "${name}"`, {
       reply_markup: { remove_keyboard: true },
     });
-    await tgSendMessage(chatId, `${t(lang2, 'your_locations')}`, { reply_markup: locationsKeyboard(lang2, locations) });
+    await sendWithFallback(chatId, `${t(lang2, 'your_locations')}`, { reply_markup: locationsKeyboard(lang2, locations) });
     return;
   }
 
   const user = await getUser(chatId);
   const lang = user?.language || 'uk';
-  await tgSendMessage(chatId, t(lang, 'send_location_prompt'), { reply_markup: mainMenuKeyboard(lang) });
+  await sendWithFallback(chatId, t(lang, 'send_location_prompt'), { reply_markup: mainMenuKeyboard(lang) });
 }
 
 // === Auto-Update (Cron) ===
@@ -1450,7 +1458,7 @@ async function updateAllUsers() {
       const lang = user.language || 'uk';
       const settings = await getUserSettings(user.chat_id);
       const msg = formatWeatherMessage(weatherData, lang, settings);
-      const result = await tgEditMessage(user.chat_id, user.last_message_id, msg, {
+      const result = await editWithFallback(user.chat_id, user.last_message_id, msg, {
         reply_markup: mainMenuKeyboard(lang),
       });
       if (result.ok) {
@@ -1530,7 +1538,7 @@ async function checkAllUsers() {
 
       // ALWAYS edit existing message (silent update, like /update)
       if (user.last_message_id) {
-        const editResult = await tgEditMessage(user.chat_id, user.last_message_id, msg, {
+        const editResult = await editWithFallback(user.chat_id, user.last_message_id, msg, {
           reply_markup: mainMenuKeyboard(lang),
         });
         if (editResult.ok) edited++;
@@ -1540,7 +1548,7 @@ async function checkAllUsers() {
       // Uses per-user cooldown from settings
       const lastAlert = user.last_alert_time || 0;
       if (rainTransition && Date.now() - lastAlert > cooldownMs) {
-        const sendResult = await tgSendMessage(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
+        const sendResult = await sendWithFallback(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
         if (sendResult.ok) {
           await saveUser(user.chat_id, {
             last_alert_time: Date.now(),
