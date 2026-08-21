@@ -156,18 +156,24 @@ async function fetchOpenMeteoFull(lat, lon) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
   const data = await res.json();
-  const tzOffset = data.utc_offset_seconds || 0;
-  const tzSign = tzOffset >= 0 ? '+' : '-';
-  const tzHours = Math.floor(Math.abs(tzOffset) / 3600);
-  const tzMins = Math.floor((Math.abs(tzOffset) % 3600) / 60);
-  const tzStr = `${tzSign}${String(tzHours).padStart(2, '0')}:${String(tzMins).padStart(2, '0')}`;
+  const tzOffsetSec = data.utc_offset_seconds || 0;
 
-  function toLocal(isoNoTz) {
-    if (!isoNoTz) return null;
-    return new Date(isoNoTz + tzStr);
+  // Convert API time string (in local tz) to a comparable timestamp
+  function apiTimeToMs(timeStr) {
+    if (!timeStr) return 0;
+    const d = new Date(timeStr + 'Z');
+    return d.getTime() + tzOffsetSec * 1000;
   }
 
-  const now = new Date();
+  // Get "now" in the API's timezone
+  const nowUtcMs = Date.now();
+  const nowLocalMs = nowUtcMs + tzOffsetSec * 1000;
+
+  function toLocalTime(timeStr) {
+    if (!timeStr) return null;
+    const ms = apiTimeToMs(timeStr);
+    return { ms, str: timeStr };
+  }
 
   const current = {
     temp_c: data.current.temperature_2m,
@@ -184,25 +190,25 @@ async function fetchOpenMeteoFull(lat, lon) {
 
   const minutely = (data.minutely_15?.time || [])
     .map((t, i) => ({
-      time: toLocal(t),
       timeStr: t,
+      ms: apiTimeToMs(t),
       precip_mm: data.minutely_15.precipitation[i],
       probability: data.minutely_15.precipitation_probability[i],
     }))
-    .filter(h => h.time && h.time >= new Date(now.getTime() - 15 * 60 * 1000));
+    .filter(h => h.ms >= nowLocalMs - 15 * 60 * 1000);
 
   const hourly = (data.hourly?.time || [])
     .map((t, i) => ({
-      time: toLocal(t),
       timeStr: t,
+      ms: apiTimeToMs(t),
       probability: data.hourly.precipitation_probability[i],
       precip_mm: data.hourly.precipitation[i],
       temp_c: data.hourly.temperature_2m[i],
       wind_speed: data.hourly.wind_speed_10m[i],
     }))
-    .filter(h => h.time && h.time >= now);
+    .filter(h => h.ms >= nowLocalMs);
 
-  return { current, minutely, hourly, timezone: data.timezone };
+  return { current, minutely, hourly, timezone: data.timezone, tzOffsetMs: tzOffsetSec * 1000, nowLocalMs };
 }
 
 // RainViewer: real-time radar precipitation
@@ -343,6 +349,8 @@ async function getRainForecast(lat, lon, chatId) {
     result.forecast = om.hourly;
     result.source = 'Open-Meteo';
     result.isRaining = om.current.is_raining;
+    result.nowLocalMs = om.nowLocalMs;
+    result.tzOffsetMs = om.tzOffsetMs;
   } catch (e) {
     console.warn('Open-Meteo failed:', e.message);
   }
@@ -357,11 +365,9 @@ async function getRainForecast(lat, lon, chatId) {
   }
 
   // 3. Check minutely_15 for recent/upcoming rain even if current is dry
-  const now = new Date();
-  const next30min = new Date(now.getTime() + 30 * 60 * 1000);
+  const next30minMs = result.nowLocalMs + 30 * 60 * 1000;
   const recentRain = result.minutely.some(m => {
-    const t = new Date(m.time);
-    return t >= now && t <= next30min && m.precip_mm > 0.1;
+    return m.ms >= result.nowLocalMs && m.ms <= next30minMs && m.precip_mm > 0.1;
   });
   if (recentRain) result.isRaining = true;
 
@@ -376,8 +382,8 @@ async function getRainForecast(lat, lon, chatId) {
           const wa = await fetchWeatherAPI(lat, lon, key);
           if (wa) {
             const hasRain = wa.some(f => {
-              const diff = (new Date(f.time) - now) / (1000 * 60);
-              return diff <= 60 && f.precip_mm > 0.2;
+              const diff = ((new Date(f.time + 'Z').getTime() + 10800000) - result.nowLocalMs) / (1000 * 60);
+              return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
             });
             if (hasRain) {
               result.forecast = wa;
@@ -421,28 +427,48 @@ function makePrecipBar(precipMm) {
   return '████████░░';
 }
 
-function formatTime(timeOrStr) {
-  const d = timeOrStr instanceof Date ? timeOrStr : new Date(timeOrStr);
+function formatTime(timeOrStr, tzOffsetMs) {
+  let d;
+  if (timeOrStr instanceof Date) {
+    d = timeOrStr;
+  } else if (typeof timeOrStr === 'string') {
+    d = new Date(timeOrStr + 'Z');
+    if (tzOffsetMs) d = new Date(d.getTime() + tzOffsetMs);
+  } else {
+    d = new Date();
+  }
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
-function formatDate(timeOrStr, lang) {
-  const d = timeOrStr instanceof Date ? timeOrStr : new Date(timeOrStr);
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+function formatDate(timeOrStr, lang, tzOffsetMs) {
+  let d;
+  if (timeOrStr instanceof Date) {
+    d = timeOrStr;
+  } else if (typeof timeOrStr === 'string') {
+    d = new Date(timeOrStr + 'Z');
+    if (tzOffsetMs) d = new Date(d.getTime() + tzOffsetMs);
+  } else {
+    d = new Date();
+  }
+  const now = new Date(Date.now() + (tzOffsetMs || 0));
+  const tomorrow = new Date(now);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
 
-  if (d.toDateString() === today.toDateString()) return t(lang, 'date_today');
+  if (d.toDateString() === now.toDateString()) return t(lang, 'date_today');
   if (d.toDateString() === tomorrow.toDateString()) return t(lang, 'date_tomorrow');
   return d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
 }
 
 function formatWeatherMessage(weatherData, lang) {
-  const { current, minutely, forecast, radar, source, isRaining } = weatherData;
+  const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
   if (!current && (!forecast || forecast.length === 0)) {
     return `<b>${t(lang, 'error_no_forecast')}</b>`;
   }
+
+  // Get current time string in local timezone for display
+  const nowLocalDate = new Date(Date.now() + (tzOffsetMs || 0));
+  const nowTimeStr = `${nowLocalDate.getUTCHours().toString().padStart(2, '0')}:${nowLocalDate.getUTCMinutes().toString().padStart(2, '0')}`;
 
   let msg = '';
 
@@ -452,14 +478,14 @@ function formatWeatherMessage(weatherData, lang) {
     const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ ДОЩ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
     msg += `<b>${intensity}</b>\n\n`;
   } else {
-    const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.time > new Date());
+    const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
-      const minsAway = Math.round((nextRain.time - new Date()) / 60000);
+      const minsAway = Math.round((nextRain.ms - nowLocalMs) / 60000);
       msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${minsAway} ХВ</b>\n\n`;
     } else {
-      const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.time > new Date());
+      const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
-        const hoursAway = Math.round((rainInForecast.time - new Date()) / (1000 * 60 * 60));
+        const hoursAway = Math.round((rainInForecast.ms - nowLocalMs) / (1000 * 60 * 60));
         msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${hoursAway}год</b>\n\n`;
       } else {
         msg += `<b>☀️ Без опадів</b>\n\n`;
@@ -487,7 +513,7 @@ function formatWeatherMessage(weatherData, lang) {
     msg += `<b>Наступні 2 години (15хв):</b>\n`;
     const displayMinutely = minutely.slice(0, 8);
     for (const m of displayMinutely) {
-      const time = formatTime(m.time);
+      const time = m.timeStr.split('T')[1];
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
       const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}мм` : '';
@@ -502,12 +528,12 @@ function formatWeatherMessage(weatherData, lang) {
     const displayHours = forecast.slice(0, 8);
     let lastDate = '';
     for (const h of displayHours) {
-      const dateStr = formatDate(h.time, lang);
+      const dateStr = formatDate(h.timeStr, lang, tzOffsetMs);
       if (dateStr !== lastDate) {
         msg += `<i>${dateStr}</i>\n`;
         lastDate = dateStr;
       }
-      const time = formatTime(h.time);
+      const time = h.timeStr.split('T')[1];
       const emoji = getWeatherEmoji(h.probability, h.precip_mm);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}мм` : '';
@@ -520,8 +546,8 @@ function formatWeatherMessage(weatherData, lang) {
   if (isRaining || radar?.is_raining) {
     msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
   } else {
-    const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.time > new Date());
-    const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.time > new Date());
+    const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
+    const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
     if (nextRainMinutely || nextRainHourly) {
       msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
     } else {
@@ -529,8 +555,7 @@ function formatWeatherMessage(weatherData, lang) {
     }
   }
 
-  const nowTime = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
-  msg += `\n🕐 ${t(lang, 'updated_at', { time: nowTime })}`;
+  msg += `\n🕐 ${t(lang, 'updated_at', { time: nowTimeStr })}`;
   if (source) msg += ` | ${source}`;
   if (radar?.is_raining) msg += ` | 📡 Radar`;
 
