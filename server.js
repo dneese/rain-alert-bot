@@ -1,6 +1,10 @@
 import { createServer } from 'http';
+import { createRequire } from 'module';
 import { initDB, getUser, saveUser, getAllUsers, getUserApiKey, getAllUserApiKeys, saveUserApiKey, deleteUserApiKey } from './lib/db.js';
 import { t, getLangName, getLangFlag, languagePages } from './lib/i18n.js';
+
+const require = createRequire(import.meta.url);
+const zlib = require('zlib');
 
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -152,6 +156,17 @@ async function fetchOpenMeteoFull(lat, lon) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
   const data = await res.json();
+  const tzOffset = data.utc_offset_seconds || 0;
+  const tzSign = tzOffset >= 0 ? '+' : '-';
+  const tzHours = Math.floor(Math.abs(tzOffset) / 3600);
+  const tzMins = Math.floor((Math.abs(tzOffset) % 3600) / 60);
+  const tzStr = `${tzSign}${String(tzHours).padStart(2, '0')}:${String(tzMins).padStart(2, '0')}`;
+
+  function toLocal(isoNoTz) {
+    if (!isoNoTz) return null;
+    return new Date(isoNoTz + tzStr);
+  }
+
   const now = new Date();
 
   const current = {
@@ -161,6 +176,7 @@ async function fetchOpenMeteoFull(lat, lon) {
     rain_mm: data.current.rain,
     weather_code: data.current.weather_code,
     wind_speed: data.current.wind_speed_10m,
+    time: data.current.time,
     is_raining: WMO_CODES[data.current.weather_code]?.rain || data.current.precipitation > 0,
     weather_icon: WMO_CODES[data.current.weather_code]?.icon || '🌤',
     weather_desc: WMO_CODES[data.current.weather_code]?.desc || 'Unknown',
@@ -168,23 +184,25 @@ async function fetchOpenMeteoFull(lat, lon) {
 
   const minutely = (data.minutely_15?.time || [])
     .map((t, i) => ({
-      time: t,
+      time: toLocal(t),
+      timeStr: t,
       precip_mm: data.minutely_15.precipitation[i],
       probability: data.minutely_15.precipitation_probability[i],
     }))
-    .filter(h => new Date(h.time) >= new Date(now.getTime() - 15 * 60 * 1000));
+    .filter(h => h.time && h.time >= new Date(now.getTime() - 15 * 60 * 1000));
 
   const hourly = (data.hourly?.time || [])
     .map((t, i) => ({
-      time: t,
+      time: toLocal(t),
+      timeStr: t,
       probability: data.hourly.precipitation_probability[i],
       precip_mm: data.hourly.precipitation[i],
       temp_c: data.hourly.temperature_2m[i],
       wind_speed: data.hourly.wind_speed_10m[i],
     }))
-    .filter(h => new Date(h.time) >= now);
+    .filter(h => h.time && h.time >= now);
 
-  return { current, minutely, hourly };
+  return { current, minutely, hourly, timezone: data.timezone };
 }
 
 // RainViewer: real-time radar precipitation
@@ -212,32 +230,80 @@ async function fetchRainViewer(lat, lon) {
   if (!tileRes.ok) return { is_raining: false, intensity: 0 };
 
   const buf = Buffer.from(await tileRes.arrayBuffer());
-  const centerPixel = getCenterPixel(buf);
-  if (!centerPixel) return { is_raining: false, intensity: 0 };
-
-  const intensity = getRadarIntensity(centerPixel);
+  const intensity = parseRadarTile(buf);
   return { is_raining: intensity > 0, intensity, ageMinutes: Math.round(ageMinutes) };
 }
 
-function getCenterPixel(pngBuf) {
+function parseRadarTile(pngBuf) {
   try {
-    const width = pngBuf.readUInt32BE(16);
-    const height = pngBuf.readUInt32BE(20);
-    const centerX = Math.floor(width / 2);
-    const centerY = Math.floor(height / 2);
-    return { r: pngBuf[54 + centerX * 4], g: pngBuf[55 + centerX * 4], b: pngBuf[56 + centerX * 4], a: pngBuf[57 + centerX * 4] };
-  } catch { return null; }
-}
+    const w = pngBuf.readUInt32BE(16);
+    const h = pngBuf.readUInt32BE(20);
 
-function getRadarIntensity(pixel) {
-  if (!pixel || pixel.a === 0) return 0;
-  const { r, g, b } = pixel;
-  if (r > 200 && g < 100 && b < 100) return 5;
-  if (r > 200 && g > 100 && b < 100) return 4;
-  if (r > 100 && g > 200 && b < 100) return 3;
-  if (r < 100 && g > 100 && b > 200) return 2;
-  if (r < 100 && g > 200 && b > 200) return 1;
-  return 0;
+    let pos = 8;
+    let palette = null;
+    let idatData = Buffer.alloc(0);
+    while (pos < pngBuf.length) {
+      const len = pngBuf.readUInt32BE(pos);
+      const type = pngBuf.slice(pos + 4, pos + 8).toString('ascii');
+      if (type === 'PLTE') {
+        palette = [];
+        const plteData = pngBuf.slice(pos + 8, pos + 8 + len);
+        for (let i = 0; i < plteData.length; i += 3) {
+          palette.push({ r: plteData[i], g: plteData[i + 1], b: plteData[i + 2], a: 255 });
+        }
+      }
+      if (type === 'tRNS') {
+        const trnsData = pngBuf.slice(pos + 8, pos + 8 + len);
+        if (palette) {
+          for (let i = 0; i < trnsData.length && i < palette.length; i++) {
+            palette[i].a = trnsData[i];
+          }
+        }
+      }
+      if (type === 'IDAT') {
+        idatData = Buffer.concat([idatData, pngBuf.slice(pos + 8, pos + 8 + len)]);
+      }
+      if (type === 'IEND') break;
+      pos += 12 + len;
+    }
+
+    if (!palette || idatData.length === 0) return 0;
+
+    const raw = zlib.inflateSync(idatData);
+    const rowBytes = 1 + w;
+    let rainPixels = 0;
+    let totalPixels = 0;
+    let maxIntensity = 0;
+
+    for (let py = 0; py < h; py++) {
+      const rowStart = py * rowBytes + 1;
+      for (let px = 0; px < w; px++) {
+        const idx = raw[rowStart + px];
+        const color = palette[idx];
+        if (color && color.a > 10) {
+          rainPixels++;
+          const brightness = (color.r + color.g + color.b) / 3;
+          if (brightness < 50) maxIntensity = Math.max(maxIntensity, 5);
+          else if (brightness < 100) maxIntensity = Math.max(maxIntensity, 4);
+          else if (brightness < 150) maxIntensity = Math.max(maxIntensity, 3);
+          else if (brightness < 200) maxIntensity = Math.max(maxIntensity, 2);
+          else maxIntensity = Math.max(maxIntensity, 1);
+        }
+        totalPixels++;
+      }
+    }
+
+    const coverage = rainPixels / totalPixels;
+    if (coverage < 0.01) return 0;
+    if (coverage < 0.05) return 1;
+    if (coverage < 0.15) return 2;
+    if (coverage < 0.30) return 3;
+    if (coverage < 0.50) return 4;
+    return 5;
+  } catch (e) {
+    console.warn('Radar parse error:', e.message);
+    return 0;
+  }
 }
 
 async function fetchWeatherAPI(lat, lon, apiKey) {
@@ -355,13 +421,13 @@ function makePrecipBar(precipMm) {
   return '████████░░';
 }
 
-function formatTime(isoStr) {
-  const d = new Date(isoStr);
+function formatTime(timeOrStr) {
+  const d = timeOrStr instanceof Date ? timeOrStr : new Date(timeOrStr);
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
-function formatDate(isoStr, lang) {
-  const d = new Date(isoStr);
+function formatDate(timeOrStr, lang) {
+  const d = timeOrStr instanceof Date ? timeOrStr : new Date(timeOrStr);
   const today = new Date();
   const tomorrow = new Date(today);
   tomorrow.setDate(tomorrow.getDate() + 1);
@@ -383,18 +449,17 @@ function formatWeatherMessage(weatherData, lang) {
   // === HEADER ===
   if (isRaining || radar.is_raining) {
     const rainMm = current?.precipitation_mm || radar.intensity * 0.5 || 0;
-    const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
-    msg += `<b>${intensity}</b>\n`;
-    msg += `<b>Спочатку дощ, потім — перевір погоду</b>\n\n`;
+    const intensity = rainMm > 3 ? '⚠️ СИЛЬНИЙ ДОЩ' : rainMm > 1 ? '🌧 ДОЩ' : '🌦 НЕВЕЛИКИЙ ДОЩ';
+    msg += `<b>${intensity}</b>\n\n`;
   } else {
-    const nextRain = minutely?.find(m => m.precip_mm > 0.1 && new Date(m.time) > new Date());
+    const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.time > new Date());
     if (nextRain) {
-      const minsAway = Math.round((new Date(nextRain.time) - new Date()) / 60000);
+      const minsAway = Math.round((nextRain.time - new Date()) / 60000);
       msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${minsAway} ХВ</b>\n\n`;
     } else {
-      const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && new Date(f.time) > new Date());
+      const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.time > new Date());
       if (rainInForecast) {
-        const hoursAway = Math.round((new Date(rainInForecast.time) - new Date()) / (1000 * 60 * 60));
+        const hoursAway = Math.round((rainInForecast.time - new Date()) / (1000 * 60 * 60));
         msg += `<b>🌧 ДОЩ ЧЕРЕЗ ${hoursAway}год</b>\n\n`;
       } else {
         msg += `<b>☀️ Без опадів</b>\n\n`;
@@ -455,8 +520,8 @@ function formatWeatherMessage(weatherData, lang) {
   if (isRaining || radar?.is_raining) {
     msg += `⚠️ <b>Йде дощ! Не забудь парасольку!</b>\n`;
   } else {
-    const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && new Date(m.time) > new Date());
-    const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && new Date(f.time) > new Date());
+    const nextRainMinutely = minutely?.find(m => m.precip_mm > 0.1 && m.time > new Date());
+    const nextRainHourly = forecast?.find(f => f.precip_mm > 0.2 && f.time > new Date());
     if (nextRainMinutely || nextRainHourly) {
       msg += `⚠️ <b>Дощ очікується! Візьми парасольку!</b>\n`;
     } else {
