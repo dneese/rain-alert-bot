@@ -38,13 +38,29 @@ async function tgSetWebhook(url) {
   return tgApi('setWebhook', { url, allowed_updates: ['message', 'callback_query'] });
 }
 
-// === Send helpers (standard HTML, works on all clients) ===
-async function sendWithFallback(chatId, html, options = {}) {
-  return tgSendMessage(chatId, html, options);
+// === Rich Message helpers with plain-HTML fallback ===
+async function tgSendRichMessage(chatId, html, options = {}) {
+  return tgApi('sendRichMessage', { chat_id: chatId, rich_message: html, ...options });
 }
 
-async function editWithFallback(chatId, messageId, html, options = {}) {
-  return tgEditMessage(chatId, messageId, html, options);
+async function tgEditRichMessage(chatId, messageId, html, options = {}) {
+  return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, rich_message: html, ...options });
+}
+
+async function sendWithFallback(chatId, richHtml, options = {}, plainHtml = null) {
+  try {
+    const r = await tgSendRichMessage(chatId, richHtml, options);
+    if (r?.ok) return r;
+  } catch (e) {}
+  return tgSendMessage(chatId, plainHtml || richHtml, options);
+}
+
+async function editWithFallback(chatId, messageId, richHtml, options = {}, plainHtml = null) {
+  try {
+    const r = await tgEditRichMessage(chatId, messageId, richHtml, options);
+    if (r?.ok) return r;
+  } catch (e) {}
+  return tgEditMessage(chatId, messageId, plainHtml || richHtml, options);
 }
 
 // === Keyboards ===
@@ -643,86 +659,81 @@ function formatDate(timeStr, lang, tzOffsetMs) {
 function formatWeatherMessage(weatherData, lang, settings) {
   const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
+  const err = `⚠️ ${t(lang, 'error_no_forecast')}`;
   if (!current && (!forecast || forecast.length === 0)) {
-    return `⚠️ ${t(lang, 'error_no_forecast')}`;
+    return { rich: err, plain: err };
   }
 
   const nowLocalDate = new Date(Date.now() + (tzOffsetMs || 0));
   const nowTimeStr = `${nowLocalDate.getUTCHours().toString().padStart(2, '0')}:${nowLocalDate.getUTCMinutes().toString().padStart(2, '0')}`;
 
-  let msg = '';
-
-  // === HEADER ===
+  // ===== SHARED: header =====
+  let headerText = '';
   if (isRaining) {
     const rainMm = current?.precipitation_mm || 0;
-    const intensity = rainMm > 3 ? `⚠️ ${t(lang, 'alert_strong_rain')}` : rainMm > 1 ? `🌧 ${t(lang, 'alert_rain')}` : `🌦 ${t(lang, 'alert_light_rain')}`;
-    msg += `<b>${intensity}</b>`;
+    headerText = rainMm > 3 ? `⚠️ ${t(lang, 'alert_strong_rain')}` : rainMm > 1 ? `🌧 ${t(lang, 'alert_rain')}` : `🌦 ${t(lang, 'alert_light_rain')}`;
   } else {
     const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
-      const minsAway = Math.round((nextRain.ms - nowLocalMs) / 60000);
-      msg += `<b>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</b>`;
+      headerText = `🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: Math.round((nextRain.ms - nowLocalMs) / 60000) })}`;
     } else {
       const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
-        const hoursAway = Math.round((rainInForecast.ms - nowLocalMs) / (1000 * 60 * 60));
-        msg += `<b>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</b>`;
+        headerText = `🌧 ${t(lang, 'alert_rain_in_hours', { hours: Math.round((rainInForecast.ms - nowLocalMs) / 3600000) })}`;
       } else {
-        msg += `<b>${t(lang, 'no_rain_header')}</b>`;
+        headerText = t(lang, 'no_rain_header');
       }
     }
   }
 
-  // === CURRENT CONDITIONS ===
+  // ===== SHARED: current conditions =====
+  let curMain = null;
+  let curExtra = [];
+  let radarLine = null;
   if (current && settings?.show_current !== false) {
     const rainIcon = current.is_raining ? '🌧' : current.weather_icon;
-    let cur = `${rainIcon} <b>${Math.round(current.temp_c)}°C</b>  💧 ${Math.round(current.humidity)}%\n`;
-    cur += `💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}`;
+    curMain = [`${rainIcon} <b>${Math.round(current.temp_c)}°C</b>`, `💧 ${Math.round(current.humidity)}%`];
+    curExtra = [`💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}`];
     if (current.precipitation_mm > 0) {
-      cur += `   🌧 ${current.precipitation_mm}${t(lang, 'unit_mm')}`;
+      curExtra.push(`🌧 ${current.precipitation_mm}${t(lang, 'unit_mm')}`);
     }
-    msg += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${cur}`;
     if (radar?.is_raining && isRaining && settings?.show_radar !== false) {
       const radarDesc = ['', t(lang, 'radar_weak'), t(lang, 'radar_moderate'), t(lang, 'radar_strong'), t(lang, 'radar_very_strong'), t(lang, 'radar_extreme')];
-      msg += `\n📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})`;
+      radarLine = `📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})`;
     }
   }
 
-  // === MINUTELY ===
+  // ===== SHARED: minutely rows =====
+  let minRows = [];
   if (minutely && minutely.length > 0 && settings?.show_minutely !== false) {
-    const displayMinutely = minutely.slice(0, 8);
-    let rows = '';
-    for (const m of displayMinutely) {
+    for (const m of minutely.slice(0, 8)) {
       const time = m.timeStr.split('T')[1];
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
       const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      rows += `${time} ${emoji} ${bar}${precip}\n`;
+      minRows.push(`${time} ${emoji} ${bar}${precip}`);
     }
-    msg += `\n\n⏱ <b>${t(lang, 'minutely_label')}</b>\n<pre>${rows.trimEnd()}</pre>`;
   }
 
-  // === HOURLY FORECAST ===
+  // ===== SHARED: hourly groups =====
+  const hourGroups = [];
   if (forecast && forecast.length > 0 && settings?.show_hourly !== false) {
-    const displayHours = forecast.slice(0, 8);
-    let rows = '';
     let lastDate = '';
-    for (const h of displayHours) {
+    for (const h of forecast.slice(0, 8)) {
       const dateStr = formatDate(h.timeStr, lang, tzOffsetMs);
       if (dateStr !== lastDate) {
-        rows += `<b>${dateStr}</b>\n`;
+        hourGroups.push({ dateStr, rows: [] });
         lastDate = dateStr;
       }
       const time = h.timeStr.split('T')[1];
       const emoji = getWeatherEmoji(h.probability, h.precip_mm, h.wmo_code);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      rows += `${time} ${emoji} ${String(h.probability).padStart(2)}% ${String(temp).padStart(3)}${precip}\n`;
+      hourGroups[hourGroups.length - 1].rows.push(`${time} ${emoji} ${String(h.probability).padStart(2)}% ${String(temp).padStart(3)}${precip}`);
     }
-    msg += `\n\n🗓 <b>${t(lang, 'forecast_label')}</b>\n<pre>${rows.trimEnd()}</pre>`;
   }
 
-  // === RECOMMENDATION (blockquote) ===
+  // ===== SHARED: recommendation =====
   const posture = settings?.posture || 'inside';
   const isOutside = posture === 'outside';
   let recText = '';
@@ -760,23 +771,24 @@ function formatWeatherMessage(weatherData, lang, settings) {
     }
   }
   const recEmoji = isRaining ? '⚠️' : (recText === (isOutside ? t(lang, 'rec_no_rain_outside') : t(lang, 'rec_no_rain_inside')) ? '✅' : '🟡');
-  msg += `\n\n<blockquote>${recEmoji} ${recText}</blockquote>`;
 
-  // === SEVERE WEATHER WARNINGS ===
+  // ===== SHARED: severe weather warnings =====
   const hasSevereCurrent = current && WMO_CODES[current.weather_code]?.severe;
   const hasSevereForecast = forecast?.some(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs && f.ms < nowLocalMs + (settings?.lookahead_min || 60) * 60 * 1000);
   const hasHailNow = current && (current.weather_code === 96 || current.weather_code === 99);
   const hasHailSoon = forecast?.some(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs && f.ms < nowLocalMs + 120 * 60 * 1000);
 
+  let severeWarn = false;
+  let severeLines = [];
   if (hasSevereCurrent || hasSevereForecast || hasHailNow || hasHailSoon) {
-    msg += `\n\n🚨 <b>${t(lang, 'severe_title')}</b>`;
+    severeWarn = true;
     if (hasHailNow) {
-      msg += `\n⛈ <b>${t(lang, 'severe_hail_now')}</b>`;
-      msg += `\n${t(lang, 'severe_hail_shelter')}`;
+      severeLines.push(`⛈ <b>${t(lang, 'severe_hail_now')}</b>`);
+      severeLines.push(t(lang, 'severe_hail_shelter'));
     } else if (hasSevereCurrent) {
       const sevDesc = t(lang, 'wmo_' + current.weather_code) || WMO_CODES[current.weather_code]?.desc || '';
-      msg += `\n⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b>`;
-      msg += `\n${t(lang, 'severe_wait_shelter')}`;
+      severeLines.push(`⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b>`);
+      severeLines.push(t(lang, 'severe_wait_shelter'));
     }
     if (hasHailSoon && !hasHailNow) {
       const hailTime = forecast.find(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs);
@@ -784,8 +796,8 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const hailMins = Math.round((hailTime.ms - nowLocalMs) / 60000);
         const hailHrs = Math.round(hailMins / 60);
         const hailETA = hailMins < 60 ? t(lang, 'eta_minutes', { minutes: hailMins }) : t(lang, 'eta_hours', { hours: hailHrs });
-        msg += `\n⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b>`;
-        msg += `\n${t(lang, 'severe_hail_prepare')}`;
+        severeLines.push(`⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b>`);
+        severeLines.push(t(lang, 'severe_hail_prepare'));
       }
     } else if (hasSevereForecast && !hasSevereCurrent) {
       const sevTime = forecast.find(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs);
@@ -793,19 +805,66 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const sevMins = Math.round((sevTime.ms - nowLocalMs) / 60000);
         const sevHrs = Math.round(sevMins / 60);
         const sevETA = sevMins < 60 ? t(lang, 'eta_minutes', { minutes: sevMins }) : t(lang, 'eta_hours', { hours: sevHrs });
-        msg += `\n⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b>`;
-        msg += `\n${t(lang, 'severe_prepare_shelter')}`;
+        severeLines.push(`⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b>`);
+        severeLines.push(t(lang, 'severe_prepare_shelter'));
       }
     }
   }
 
-  // === FOOTER ===
-  let footerParts = [t(lang, 'updated_at', { time: nowTimeStr })];
+  // ===== SHARED: footer =====
+  const footerParts = [t(lang, 'updated_at', { time: nowTimeStr })];
   if (source) footerParts.push(source);
   if (radar?.is_raining && isRaining) footerParts.push('📡 Radar');
-  msg += `\n\n<i>${footerParts.join(' · ')}</i>`;
 
-  return msg;
+  // ===== RICH VERSION (new Telegram clients: Desktop 6.9+, iOS/Android 12.8+) =====
+  let rich = `<h3>${headerText}</h3>`;
+  if (curMain) {
+    rich += `<table bordered striped><tr><th>${t(lang, 'current_label')}</th><th></th></tr>`;
+    rich += `<tr><td>${curMain[0]}</td><td>${curMain[1]}</td></tr>`;
+    rich += `<tr><td>${curExtra[0] || ''}</td><td>${curExtra[1] || ''}</td></tr>`;
+    if (radarLine) rich += `<tr><td colspan="2">${radarLine}</td></tr>`;
+    rich += `</table>`;
+  }
+  if (minRows.length) {
+    rich += `<details><summary>⏱ ${t(lang, 'minutely_label')}</summary>` +
+      minRows.map(r => `<p><code>${r}</code></p>`).join('') + `</details>`;
+  }
+  if (hourGroups.length) {
+    let hc = '';
+    for (const g of hourGroups) {
+      hc += `<p><b>${g.dateStr}</b></p>` + g.rows.map(r => `<p><code>${r}</code></p>`).join('');
+    }
+    rich += `<details open><summary>🗓 ${t(lang, 'forecast_label')}</summary>${hc}</details>`;
+  }
+  rich += `<blockquote>${recEmoji} ${recText}</blockquote>`;
+  if (severeWarn) {
+    rich += `<h5>🚨 ${t(lang, 'severe_title')}</h5>` + severeLines.map(l => `<p>${l}</p>`).join('');
+  }
+  rich += `<footer>${footerParts.join(' | ')}</footer>`;
+
+  // ===== PLAIN VERSION (fallback for Telegram Web/X/macOS) =====
+  let plain = `<b>${headerText}</b>`;
+  if (curMain) {
+    plain += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${curMain[0]}  ${curMain[1]}\n${curExtra.join('   ')}`;
+    if (radarLine) plain += `\n${radarLine}`;
+  }
+  if (minRows.length) {
+    plain += `\n\n⏱ <b>${t(lang, 'minutely_label')}</b>\n<pre>${minRows.join('\n')}</pre>`;
+  }
+  if (hourGroups.length) {
+    let hr = '';
+    for (const g of hourGroups) {
+      hr += `<b>${g.dateStr}</b>\n` + g.rows.join('\n');
+    }
+    plain += `\n\n🗓 <b>${t(lang, 'forecast_label')}</b>\n<pre>${hr.trimEnd()}</pre>`;
+  }
+  plain += `\n\n<blockquote>${recEmoji} ${recText}</blockquote>`;
+  if (severeWarn) {
+    plain += `\n\n🚨 <b>${t(lang, 'severe_title')}</b>\n${severeLines.join('\n')}`;
+  }
+  plain += `\n\n<i>${footerParts.join(' · ')}</i>`;
+
+  return { rich, plain };
 }
 
 // === Callback Handler ===
@@ -839,7 +898,7 @@ async function handleCallbackQuery(callbackQuery) {
     const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
     const settings = await getUserSettings(chatId);
     const msg = formatWeatherMessage(weatherData, lang, settings);
-    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const result = await sendWithFallback(chatId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -1305,7 +1364,7 @@ async function handleMessage(message) {
     const weatherData = await getRainForecast(user.latitude, user.longitude, chatId);
     const settings = await getUserSettings(chatId);
     const msg = formatWeatherMessage(weatherData, lang, settings);
-    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const result = await sendWithFallback(chatId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -1322,8 +1381,9 @@ async function handleMessage(message) {
     const lang = user?.language || 'uk';
     const weatherData = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
     const settings = await getUserSettings(chatId);
-    const msg = `<b>${t(lang, 'location_saved')}</b>\n\n${formatWeatherMessage(weatherData, lang, settings)}`;
-    const result = await sendWithFallback(chatId, msg, { reply_markup: mainMenuKeyboard(lang) });
+    const w = formatWeatherMessage(weatherData, lang, settings);
+    const savedPrefix = `<b>${t(lang, 'location_saved')}</b>`;
+    const result = await sendWithFallback(chatId, `${savedPrefix}\n\n${w.rich}`, { reply_markup: mainMenuKeyboard(lang) }, `${savedPrefix}\n\n${w.plain}`);
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
@@ -1443,9 +1503,9 @@ async function updateAllUsers() {
       const lang = user.language || 'uk';
       const settings = await getUserSettings(user.chat_id);
       const msg = formatWeatherMessage(weatherData, lang, settings);
-      const result = await editWithFallback(user.chat_id, user.last_message_id, msg, {
+      const result = await editWithFallback(user.chat_id, user.last_message_id, msg.rich, {
         reply_markup: mainMenuKeyboard(lang),
-      });
+      }, msg.plain);
       if (result.ok) {
         updated++;
       } else {
@@ -1523,9 +1583,9 @@ async function checkAllUsers() {
 
       // ALWAYS edit existing message (silent update, like /update)
       if (user.last_message_id) {
-        const editResult = await editWithFallback(user.chat_id, user.last_message_id, msg, {
+        const editResult = await editWithFallback(user.chat_id, user.last_message_id, msg.rich, {
           reply_markup: mainMenuKeyboard(lang),
-        });
+        }, msg.plain);
         if (editResult.ok) edited++;
       }
 
@@ -1533,7 +1593,7 @@ async function checkAllUsers() {
       // Uses per-user cooldown from settings
       const lastAlert = user.last_alert_time || 0;
       if (rainTransition && Date.now() - lastAlert > cooldownMs) {
-        const sendResult = await sendWithFallback(user.chat_id, msg, { reply_markup: mainMenuKeyboard(lang) });
+        const sendResult = await sendWithFallback(user.chat_id, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
         if (sendResult.ok) {
           await saveUser(user.chat_id, {
             last_alert_time: Date.now(),
