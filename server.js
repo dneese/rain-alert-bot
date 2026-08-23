@@ -38,28 +38,36 @@ async function tgSetWebhook(url) {
   return tgApi('setWebhook', { url, allowed_updates: ['message', 'callback_query'] });
 }
 
-// === Rich Message helpers with plain-HTML fallback ===
+// === Rich Message helpers (Bot API 10.1+) with plain-HTML fallback ===
+// InputRichMessage contract: rich_message must be { html } or { markdown }, never both.
+let richEnabled = true; // latched off on permanent capability errors
 async function tgSendRichMessage(chatId, html, options = {}) {
-  return tgApi('sendRichMessage', { chat_id: chatId, rich_message: html, ...options });
+  return tgApi('sendRichMessage', { chat_id: chatId, rich_message: { html }, ...options });
 }
 
 async function tgEditRichMessage(chatId, messageId, html, options = {}) {
-  return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, rich_message: html, ...options });
+  return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, rich_message: { html }, ...options });
 }
 
 async function sendWithFallback(chatId, richHtml, options = {}, plainHtml = null) {
-  try {
-    const r = await tgSendRichMessage(chatId, richHtml, options);
-    if (r?.ok) return r;
-  } catch (e) {}
+  if (richEnabled) {
+    try {
+      const r = await tgSendRichMessage(chatId, richHtml, options);
+      if (r?.ok) return r;
+      if (r && r.error_code === 404) richEnabled = false; // endpoint not available
+    } catch (e) {}
+  }
   return tgSendMessage(chatId, plainHtml || richHtml, options);
 }
 
 async function editWithFallback(chatId, messageId, richHtml, options = {}, plainHtml = null) {
-  try {
-    const r = await tgEditRichMessage(chatId, messageId, richHtml, options);
-    if (r?.ok) return r;
-  } catch (e) {}
+  if (richEnabled) {
+    try {
+      const r = await tgEditRichMessage(chatId, messageId, richHtml, options);
+      if (r?.ok) return r;
+      if (r && r.error_code === 404) richEnabled = false; // endpoint not available
+    } catch (e) {}
+  }
   return tgEditMessage(chatId, messageId, plainHtml || richHtml, options);
 }
 
@@ -660,6 +668,9 @@ async function getRainForecast(lat, lon, chatId) {
     console.warn('AirQuality failed:', e.message);
   }
 
+  result.lat = lat;
+  result.lon = lon;
+
   // 2. RainViewer: real-time radar (FREE, no key) — SUPPLEMENTARY only
   try {
     result.radar = await fetchRainViewer(lat, lon);
@@ -944,11 +955,14 @@ function formatWeatherMessage(weatherData, lang, settings) {
     }
   }
 
-  // ===== RICH VERSION (new Telegram clients: Desktop 6.9+, iOS/Android 12.8+) =====
-  let rich = `<h3>${headerText}</h3>`;
+  // ===== RICH VERSION (Bot API 10.1+ Rich Messages) =====
+  // Best practices: one clear heading, short summary, h3 sections,
+  // table with caption for structured data, blockquote/aside for key statuses,
+  // details for optional depth, map + footer as closing blocks.
+  let rich = `<h2>${headerText}</h2>`;
   if (dailyLine) rich += `<p>${dailyLine}</p>`;
   if (curMain) {
-    rich += `<table bordered striped><tr><th>${t(lang, 'current_label')}</th><th></th></tr>`;
+    rich += `<table bordered striped><caption>📍 ${t(lang, 'current_label')}</caption>`;
     rich += `<tr><td>${curMain[0]}</td><td>${curMain[1]}</td></tr>`;
     rich += `<tr><td>${curExtra[0] || ''}</td><td>${curExtra[1] || ''}</td></tr>`;
     if (radarLine) rich += `<tr><td colspan="2">${radarLine}</td></tr>`;
@@ -959,20 +973,24 @@ function formatWeatherMessage(weatherData, lang, settings) {
   }
   if (minRows.length) {
     rich += `<details><summary>⏱ ${t(lang, 'minutely_label')}</summary>` +
-      minRows.map(r => `<p><code>${r}</code></p>`).join('') + `</details>`;
+      `<pre>${minRows.join('\n')}</pre></details>`;
   }
   if (hourGroups.length) {
-    let hc = '';
+    let hr = '';
     for (const g of hourGroups) {
-      hc += `<p><b>${g.dateStr}</b></p>` + g.rows.map(r => `<p><code>${r}</code></p>`).join('');
+      hr += `<b>${g.dateStr}</b>\n` + g.rows.join('\n');
     }
-    rich += `<details open><summary>🗓 ${t(lang, 'forecast_label')}</summary>${hc}</details>`;
+    rich += `<details open><summary>🗓 ${t(lang, 'forecast_label')}</summary><pre>${hr.trimEnd()}</pre></details>`;
   }
   rich += `<blockquote>${recEmoji} ${recText}</blockquote>`;
   if (severeWarn) {
-    rich += `<h5>🚨 ${t(lang, 'severe_title')}</h5>` + severeLines.map(l => `<p>${l}</p>`).join('');
+    rich += `<aside>🚨 <b>${t(lang, 'severe_title')}</b></aside>` +
+      severeLines.map(l => `<p>${l}</p>`).join('');
   }
-  rich += `<footer>${footerParts.join(' | ')}</footer>`;
+  if (weatherData.lat != null) {
+    rich += `<tg-map lat="${Number(weatherData.lat).toFixed(4)}" long="${Number(weatherData.lon).toFixed(4)}" zoom="13"/>`;
+  }
+  rich += `<hr/><footer>${footerParts.join(' | ')}</footer>`;
 
   // ===== PLAIN VERSION (fallback for Telegram Web/X/macOS) =====
   let plain = `<b>${headerText}</b>`;
