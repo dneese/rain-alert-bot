@@ -38,24 +38,12 @@ async function tgSetWebhook(url) {
   return tgApi('setWebhook', { url, allowed_updates: ['message', 'callback_query'] });
 }
 
-// === Rich Message helpers with fallback ===
-async function tgSendRichMessage(chatId, richMessage, options = {}) {
-  return tgApi('sendRichMessage', { chat_id: chatId, rich_message: richMessage, ...options });
-}
-
-async function tgEditRichMessage(chatId, messageId, richMessage, options = {}) {
-  return tgApi('editMessageText', { chat_id: chatId, message_id: messageId, rich_message: richMessage, ...options });
-}
-
+// === Send helpers (standard HTML, works on all clients) ===
 async function sendWithFallback(chatId, html, options = {}) {
-  const richResult = await tgSendRichMessage(chatId, { html }, options);
-  if (richResult.ok) return richResult;
   return tgSendMessage(chatId, html, options);
 }
 
 async function editWithFallback(chatId, messageId, html, options = {}) {
-  const richResult = await tgEditRichMessage(chatId, messageId, { html }, options);
-  if (richResult.ok) return richResult;
   return tgEditMessage(chatId, messageId, html, options);
 }
 
@@ -143,19 +131,19 @@ function settingsDetailKeyboard(lang, settings) {
   return {
     inline_keyboard: [
       [
-        { text: `🌧 ${t(lang, 'set_rain_threshold')}: <b>${s.rain_threshold_mm || 0.5}${t(lang, 'unit_mm')}</b>`, callback_data: 'cb_settings_threshold' },
+        { text: `🌧 ${t(lang, 'set_rain_threshold')}: ${s.rain_threshold_mm || 0.5}${t(lang, 'unit_mm')}`, callback_data: 'cb_settings_threshold' },
       ],
       [
-        { text: `⏱ ${t(lang, 'set_lookahead')}: <b>${s.lookahead_min || 30}${t(lang, 'unit_min')}</b>`, callback_data: 'cb_settings_lookahead' },
+        { text: `⏱ ${t(lang, 'set_lookahead')}: ${s.lookahead_min || 30}${t(lang, 'unit_min')}`, callback_data: 'cb_settings_lookahead' },
       ],
       [
         { text: `${radarLabel}`, callback_data: 'cb_settings_radar' },
       ],
       [
-        { text: `⏰ ${t(lang, 'set_cooldown')}: <b>${s.alert_cooldown_min || 30}${t(lang, 'unit_min')}</b>`, callback_data: 'cb_settings_cooldown' },
+        { text: `⏰ ${t(lang, 'set_cooldown')}: ${s.alert_cooldown_min || 30}${t(lang, 'unit_min')}`, callback_data: 'cb_settings_cooldown' },
       ],
       [
-        { text: `${s.posture === 'outside' ? '🚶' : '🏠'} ${t(lang, 'set_mode')}: <b>${s.posture === 'outside' ? t(lang, 'mode_outside') : t(lang, 'mode_inside')}</b>`, callback_data: 'cb_settings_posture' },
+        { text: `${s.posture === 'outside' ? '🚶' : '🏠'} ${t(lang, 'set_mode')}: ${s.posture === 'outside' ? t(lang, 'mode_outside') : t(lang, 'mode_inside')}`, callback_data: 'cb_settings_posture' },
       ],
       [
         { text: `🔧 ${t(lang, 'set_advanced') || 'Розширені'}`, callback_data: 'cb_adv_settings' },
@@ -656,7 +644,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
   if (!current && (!forecast || forecast.length === 0)) {
-    return `<h3>${t(lang, 'error_no_forecast')}</h3>`;
+    return `⚠️ ${t(lang, 'error_no_forecast')}`;
   }
 
   const nowLocalDate = new Date(Date.now() + (tzOffsetMs || 0));
@@ -668,73 +656,70 @@ function formatWeatherMessage(weatherData, lang, settings) {
   if (isRaining) {
     const rainMm = current?.precipitation_mm || 0;
     const intensity = rainMm > 3 ? `⚠️ ${t(lang, 'alert_strong_rain')}` : rainMm > 1 ? `🌧 ${t(lang, 'alert_rain')}` : `🌦 ${t(lang, 'alert_light_rain')}`;
-    msg += `<h3>${intensity}</h3>`;
+    msg += `<b>${intensity}</b>`;
   } else {
     const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
       const minsAway = Math.round((nextRain.ms - nowLocalMs) / 60000);
-      msg += `<h3>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</h3>`;
+      msg += `<b>🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: minsAway })}</b>`;
     } else {
       const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
         const hoursAway = Math.round((rainInForecast.ms - nowLocalMs) / (1000 * 60 * 60));
-        msg += `<h3>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</h3>`;
+        msg += `<b>🌧 ${t(lang, 'alert_rain_in_hours', { hours: hoursAway })}</b>`;
       } else {
-        msg += `<h3>☀️ ${t(lang, 'no_rain_header')}</h3>`;
+        msg += `<b>${t(lang, 'no_rain_header')}</b>`;
       }
     }
   }
 
-  // === CURRENT CONDITIONS (table) ===
+  // === CURRENT CONDITIONS ===
   if (current && settings?.show_current !== false) {
     const rainIcon = current.is_raining ? '🌧' : current.weather_icon;
-    msg += `<table bordered striped><tr><th>${t(lang, 'current_label')}</th><th></th></tr>`;
-    msg += `<tr><td>${rainIcon} ${Math.round(current.temp_c)}°C</td><td>💧 ${Math.round(current.humidity)}%</td></tr>`;
-    msg += `<tr><td>💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}</td>`;
+    let cur = `${rainIcon} <b>${Math.round(current.temp_c)}°C</b>  💧 ${Math.round(current.humidity)}%\n`;
+    cur += `💨 ${Math.round(current.wind_speed)}${t(lang, 'unit_kmh')}`;
     if (current.precipitation_mm > 0) {
-      msg += `<td>🌧 ${current.precipitation_mm}${t(lang, 'unit_mm')}</td></tr>`;
-    } else {
-      msg += `<td></td></tr>`;
+      cur += `   🌧 ${current.precipitation_mm}${t(lang, 'unit_mm')}`;
     }
+    msg += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${cur}`;
     if (radar?.is_raining && isRaining && settings?.show_radar !== false) {
       const radarDesc = ['', t(lang, 'radar_weak'), t(lang, 'radar_moderate'), t(lang, 'radar_strong'), t(lang, 'radar_very_strong'), t(lang, 'radar_extreme')];
-      msg += `<tr><td colspan="2">📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})</td></tr>`;
+      msg += `\n📡 ${t(lang, 'radar_label')}: ${radarDesc[radar.intensity] || t(lang, 'yes')} (${radar.ageMinutes || '?'}${t(lang, 'unit_min_ago')})`;
     }
-    msg += `</table>`;
   }
 
-  // === MINUTELY (collapsible) ===
+  // === MINUTELY ===
   if (minutely && minutely.length > 0 && settings?.show_minutely !== false) {
     const displayMinutely = minutely.slice(0, 8);
-    let minutelyContent = '';
+    let rows = '';
     for (const m of displayMinutely) {
       const time = m.timeStr.split('T')[1];
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
       const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      minutelyContent += `<p><code>${time} ${emoji} ${bar}${precip}</code></p>`;
+      rows += `${time} ${emoji} ${bar}${precip}\n`;
     }
-    msg += `<details><summary>${t(lang, 'minutely_label')}</summary>${minutelyContent}</details>`;
+    msg += `\n\n⏱ <b>${t(lang, 'minutely_label')}</b>\n<pre>${rows.trimEnd()}</pre>`;
   }
 
-  // === HOURLY FORECAST (collapsible) ===
+  // === HOURLY FORECAST ===
   if (forecast && forecast.length > 0 && settings?.show_hourly !== false) {
     const displayHours = forecast.slice(0, 8);
-    let hourlyContent = '';
+    let rows = '';
     let lastDate = '';
     for (const h of displayHours) {
       const dateStr = formatDate(h.timeStr, lang, tzOffsetMs);
       if (dateStr !== lastDate) {
-        hourlyContent += `<p><i>${dateStr}</i></p>`;
+        rows += `<b>${dateStr}</b>\n`;
         lastDate = dateStr;
       }
       const time = h.timeStr.split('T')[1];
       const emoji = getWeatherEmoji(h.probability, h.precip_mm, h.wmo_code);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      hourlyContent += `<p><code>${time} ${emoji} ${h.probability}% ${temp}${precip}</code></p>`;
+      rows += `${time} ${emoji} ${String(h.probability).padStart(2)}% ${String(temp).padStart(3)}${precip}\n`;
     }
-    msg += `<details><summary>${t(lang, 'forecast_label')}</summary>${hourlyContent}</details>`;
+    msg += `\n\n🗓 <b>${t(lang, 'forecast_label')}</b>\n<pre>${rows.trimEnd()}</pre>`;
   }
 
   // === RECOMMENDATION (blockquote) ===
@@ -775,7 +760,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
     }
   }
   const recEmoji = isRaining ? '⚠️' : (recText === (isOutside ? t(lang, 'rec_no_rain_outside') : t(lang, 'rec_no_rain_inside')) ? '✅' : '🟡');
-  msg += `<blockquote>${recEmoji} <b>${recText}</b></blockquote>`;
+  msg += `\n\n<blockquote>${recEmoji} ${recText}</blockquote>`;
 
   // === SEVERE WEATHER WARNINGS ===
   const hasSevereCurrent = current && WMO_CODES[current.weather_code]?.severe;
@@ -784,14 +769,14 @@ function formatWeatherMessage(weatherData, lang, settings) {
   const hasHailSoon = forecast?.some(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs && f.ms < nowLocalMs + 120 * 60 * 1000);
 
   if (hasSevereCurrent || hasSevereForecast || hasHailNow || hasHailSoon) {
-    msg += `<h5>🚨 ${t(lang, 'severe_title')}</h5>`;
+    msg += `\n\n🚨 <b>${t(lang, 'severe_title')}</b>`;
     if (hasHailNow) {
-      msg += `<p>⛈ <b>${t(lang, 'severe_hail_now')}</b></p>`;
-      msg += `<p>${t(lang, 'severe_hail_shelter')}</p>`;
+      msg += `\n⛈ <b>${t(lang, 'severe_hail_now')}</b>`;
+      msg += `\n${t(lang, 'severe_hail_shelter')}`;
     } else if (hasSevereCurrent) {
       const sevDesc = t(lang, 'wmo_' + current.weather_code) || WMO_CODES[current.weather_code]?.desc || '';
-      msg += `<p>⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b></p>`;
-      msg += `<p>${t(lang, 'severe_wait_shelter')}</p>`;
+      msg += `\n⛈ <b>${sevDesc} ${t(lang, 'severe_now')}</b>`;
+      msg += `\n${t(lang, 'severe_wait_shelter')}`;
     }
     if (hasHailSoon && !hasHailNow) {
       const hailTime = forecast.find(f => (f.wmo_code === 96 || f.wmo_code === 99) && f.ms > nowLocalMs);
@@ -799,8 +784,8 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const hailMins = Math.round((hailTime.ms - nowLocalMs) / 60000);
         const hailHrs = Math.round(hailMins / 60);
         const hailETA = hailMins < 60 ? t(lang, 'eta_minutes', { minutes: hailMins }) : t(lang, 'eta_hours', { hours: hailHrs });
-        msg += `<p>⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b></p>`;
-        msg += `<p>${t(lang, 'severe_hail_prepare')}</p>`;
+        msg += `\n⛈ <b>${t(lang, 'severe_hail_soon', { time: hailETA })}</b>`;
+        msg += `\n${t(lang, 'severe_hail_prepare')}`;
       }
     } else if (hasSevereForecast && !hasSevereCurrent) {
       const sevTime = forecast.find(f => WMO_CODES[f.wmo_code]?.severe && f.ms > nowLocalMs);
@@ -808,17 +793,17 @@ function formatWeatherMessage(weatherData, lang, settings) {
         const sevMins = Math.round((sevTime.ms - nowLocalMs) / 60000);
         const sevHrs = Math.round(sevMins / 60);
         const sevETA = sevMins < 60 ? t(lang, 'eta_minutes', { minutes: sevMins }) : t(lang, 'eta_hours', { hours: sevHrs });
-        msg += `<p>⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b></p>`;
-        msg += `<p>${t(lang, 'severe_prepare_shelter')}</p>`;
+        msg += `\n⛈ <b>${t(lang, 'severe_storm_soon', { time: sevETA })}</b>`;
+        msg += `\n${t(lang, 'severe_prepare_shelter')}`;
       }
     }
   }
 
   // === FOOTER ===
-  let footerParts = [`🕐 ${t(lang, 'updated_at', { time: nowTimeStr })}`];
+  let footerParts = [t(lang, 'updated_at', { time: nowTimeStr })];
   if (source) footerParts.push(source);
   if (radar?.is_raining && isRaining) footerParts.push('📡 Radar');
-  msg += `<footer>${footerParts.join(' | ')}</footer>`;
+  msg += `\n\n<i>${footerParts.join(' · ')}</i>`;
 
   return msg;
 }
