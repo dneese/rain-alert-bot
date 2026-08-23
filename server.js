@@ -64,12 +64,17 @@ async function editWithFallback(chatId, messageId, richHtml, options = {}, plain
 }
 
 // === Keyboards ===
+const SUPPORTED_LANGS = ['uk', 'en', 'ru', 'pl', 'de', 'fr', 'es', 'it', 'pt', 'nl', 'cs', 'sk', 'ro', 'hu', 'bg', 'hr', 'tr', 'ar', 'he', 'zh', 'ja', 'ko'];
+
 function mainMenuKeyboard(lang) {
   return {
     inline_keyboard: [
       [
         { text: t(lang, 'btn_location'), callback_data: 'cb_location' },
         { text: t(lang, 'btn_check'), callback_data: 'cb_check' },
+      ],
+      [
+        { text: `↻ ${t(lang, 'btn_refresh')}`, callback_data: 'cb_update' },
       ],
       [
         { text: t(lang, 'btn_settings'), callback_data: 'cb_settings' },
@@ -359,7 +364,7 @@ const WMO_CODES = {
 
 // Open-Meteo: current + minutely_15 + hourly in ONE call
 async function fetchOpenMeteoFull(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m,weather_code&timezone=auto&forecast_days=2`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m,weather_code&daily=sunrise,sunset,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto&forecast_days=2`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
   const data = await res.json();
@@ -409,7 +414,81 @@ async function fetchOpenMeteoFull(lat, lon) {
     }))
     .filter(h => h.ms >= nowLocalMs);
 
-  return { current, minutely, hourly, timezone: data.timezone, tzOffsetMs: tzOffsetSec * 1000, nowLocalMs };
+  const daily = data.daily ? {
+    sunrise: data.daily.sunrise?.[0] || null,
+    sunset: data.daily.sunset?.[0] || null,
+    tmax: data.daily.temperature_2m_max?.[0] ?? null,
+    tmin: data.daily.temperature_2m_min?.[0] ?? null,
+    precip_sum: data.daily.precipitation_sum?.[0] ?? 0,
+  } : null;
+
+  return { current, minutely, hourly, daily, timezone: data.timezone, tzOffsetMs: tzOffsetSec * 1000, nowLocalMs };
+}
+
+// Open-Meteo Air Quality API: European AQI + UV index (+ pollen for Europe)
+// Separate endpoint = separate free quota (10k/day), doesn't touch forecast limits
+async function fetchAirQuality(lat, lon) {
+  const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=european_aqi,pm2_5,uv_index,grass_pollen,birch_pollen,alder_pollen&timezone=auto`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`AirQuality: ${res.status}`);
+  const d = await res.json();
+  const c = d.current || {};
+  return {
+    european_aqi: c.european_aqi,
+    pm2_5: c.pm2_5,
+    uv_index: c.uv_index,
+    grass_pollen: c.grass_pollen,
+    birch_pollen: c.birch_pollen,
+    alder_pollen: c.alder_pollen,
+  };
+}
+
+// MET Norway (api.met.no): free fallback source, no key needed, requires User-Agent.
+// Used only when Open-Meteo is down. Display times are UTC in this degraded mode;
+// alert logic stays correct because ms epochs are real UTC.
+async function fetchMetNorway(lat, lon) {
+  const url = `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'RainAlertBot/1.0 github.com/dneese/rain-alert-bot' } });
+  if (!res.ok) throw new Error(`MET Norway: ${res.status}`);
+  const d = await res.json();
+  const series = d.properties?.timeseries || [];
+  if (!series.length) throw new Error('MET Norway: empty timeseries');
+  const now = Date.now();
+
+  let first = series[0];
+  for (const s of series) {
+    if (new Date(s.time).getTime() >= now - 30 * 60 * 1000) { first = s; break; }
+  }
+  const inst = first.data?.instant?.details || {};
+  const next1 = first.data?.next_1_hours?.details || {};
+  const current = {
+    temp_c: inst.air_temperature ?? null,
+    humidity: inst.relative_humidity ?? null,
+    precipitation_mm: next1.precipitation_amount ?? 0,
+    wind_speed: inst.wind_speed != null ? inst.wind_speed * 3.6 : null,
+    weather_code: null,
+    is_raining: (next1.precipitation_amount ?? 0) > 0.1,
+    weather_icon: '🌧',
+  };
+
+  const pad = n => String(n).padStart(2, '0');
+  const hourly = series
+    .filter(s => new Date(s.time).getTime() >= now)
+    .slice(0, 12)
+    .map(s => {
+      const dt = new Date(s.time);
+      const n1h = s.data?.next_1_hours?.details || {};
+      return {
+        timeStr: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}T${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}`,
+        ms: dt.getTime(),
+        probability: null,
+        precip_mm: n1h.precipitation_amount ?? 0,
+        temp_c: s.data?.instant?.details?.air_temperature ?? null,
+        wmo_code: null,
+      };
+    });
+
+  return { current, hourly };
 }
 
 // RainViewer: real-time radar precipitation
@@ -537,6 +616,8 @@ async function getRainForecast(lat, lon, chatId) {
     current: null,
     minutely: [],
     forecast: [],
+    daily: null,
+    air: null,
     radar: { is_raining: false, intensity: 0 },
     source: 'none',
     isRaining: false,
@@ -548,12 +629,35 @@ async function getRainForecast(lat, lon, chatId) {
     result.current = om.current;
     result.minutely = om.minutely;
     result.forecast = om.hourly;
+    result.daily = om.daily;
     result.source = 'Open-Meteo';
     result.isRaining = om.current.is_raining;
     result.nowLocalMs = om.nowLocalMs;
     result.tzOffsetMs = om.tzOffsetMs;
   } catch (e) {
     console.warn('Open-Meteo failed:', e.message);
+  }
+
+  // 1b. MET Norway: fallback when Open-Meteo is down
+  if (!result.current) {
+    try {
+      const met = await fetchMetNorway(lat, lon);
+      result.current = met.current;
+      result.forecast = met.hourly;
+      result.source = 'MET Norway';
+      result.isRaining = met.current.is_raining;
+      result.nowLocalMs = Date.now();
+      result.tzOffsetMs = 0;
+    } catch (e) {
+      console.warn('MET Norway failed:', e.message);
+    }
+  }
+
+  // 1c. Air quality + UV (separate free quota, non-critical)
+  try {
+    result.air = await fetchAirQuality(lat, lon);
+  } catch (e) {
+    console.warn('AirQuality failed:', e.message);
   }
 
   // 2. RainViewer: real-time radar (FREE, no key) — SUPPLEMENTARY only
@@ -729,7 +833,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
       const emoji = getWeatherEmoji(h.probability, h.precip_mm, h.wmo_code);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
-      hourGroups[hourGroups.length - 1].rows.push(`${time} ${emoji} ${String(h.probability).padStart(2)}% ${String(temp).padStart(3)}${precip}`);
+      hourGroups[hourGroups.length - 1].rows.push(`${time} ${emoji} ${h.probability != null ? String(h.probability).padStart(2) + '%' : '  ·'} ${String(temp).padStart(3)}${precip}`);
     }
   }
 
@@ -816,14 +920,42 @@ function formatWeatherMessage(weatherData, lang, settings) {
   if (source) footerParts.push(source);
   if (radar?.is_raining && isRaining) footerParts.push('📡 Radar');
 
+  // ===== SHARED: daily sun times =====
+  let dailyLine = null;
+  if (weatherData.daily && settings?.show_daily !== false) {
+    const hm = s => s ? s.split('T')[1].slice(0, 5) : '--:--';
+    const d = weatherData.daily;
+    dailyLine = `🌅 ${hm(d.sunrise)} · 🌇 ${hm(d.sunset)} · ⬆️${d.tmax != null ? Math.round(d.tmax) : '--'}° ⬇️${d.tmin != null ? Math.round(d.tmin) : '--'}°`;
+  }
+
+  // ===== SHARED: air quality + UV =====
+  let aqLines = [];
+  if (weatherData.air && settings?.show_air !== false) {
+    const aq = weatherData.air;
+    if (aq.european_aqi != null) {
+      const bands = [[20, 'aqi_good', '🟢'], [40, 'aqi_moderate', '🟡'], [60, 'aqi_poor', '🟠'], [80, 'aqi_unhealthy', '🔴'], [100, 'aqi_very_unhealthy', '🟣'], [Infinity, 'aqi_hazardous', '☠️']];
+      const b = bands.find(([lim]) => aq.european_aqi <= lim);
+      if (b) aqLines.push(`🌿 ${t(lang, 'aqi_label')}: ${b[2]} ${t(lang, b[1])} (${Math.round(aq.european_aqi)})`);
+    }
+    if (aq.uv_index != null) {
+      const uvIcons = [[3, '🟢'], [6, '🟡'], [8, '🟠'], [11, '🔴'], [Infinity, '🟣']];
+      const uvB = uvIcons.find(([lim]) => aq.uv_index < lim);
+      aqLines.push(`🕶 ${t(lang, 'uv_label')}: ${Math.round(aq.uv_index)} ${uvB[1]}`);
+    }
+  }
+
   // ===== RICH VERSION (new Telegram clients: Desktop 6.9+, iOS/Android 12.8+) =====
   let rich = `<h3>${headerText}</h3>`;
+  if (dailyLine) rich += `<p>${dailyLine}</p>`;
   if (curMain) {
     rich += `<table bordered striped><tr><th>${t(lang, 'current_label')}</th><th></th></tr>`;
     rich += `<tr><td>${curMain[0]}</td><td>${curMain[1]}</td></tr>`;
     rich += `<tr><td>${curExtra[0] || ''}</td><td>${curExtra[1] || ''}</td></tr>`;
     if (radarLine) rich += `<tr><td colspan="2">${radarLine}</td></tr>`;
+    for (const l of aqLines) rich += `<tr><td colspan="2">${l}</td></tr>`;
     rich += `</table>`;
+  } else {
+    for (const l of aqLines) rich += `<p>${l}</p>`;
   }
   if (minRows.length) {
     rich += `<details><summary>⏱ ${t(lang, 'minutely_label')}</summary>` +
@@ -844,9 +976,13 @@ function formatWeatherMessage(weatherData, lang, settings) {
 
   // ===== PLAIN VERSION (fallback for Telegram Web/X/macOS) =====
   let plain = `<b>${headerText}</b>`;
+  if (dailyLine) plain += `\n${dailyLine}`;
   if (curMain) {
     plain += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${curMain[0]}  ${curMain[1]}\n${curExtra.join('   ')}`;
     if (radarLine) plain += `\n${radarLine}`;
+  }
+  for (const l of aqLines) {
+    plain += `\n${l}`;
   }
   if (minRows.length) {
     plain += `\n\n⏱ <b>${t(lang, 'minutely_label')}</b>\n<pre>${minRows.join('\n')}</pre>`;
@@ -902,6 +1038,28 @@ async function handleCallbackQuery(callbackQuery) {
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
     }
+    return;
+  }
+
+  if (data === 'cb_update') {
+    const u = await getUser(chatId);
+    if (!u || !u.latitude) {
+      await sendWithFallback(chatId, t(lang, 'location_needed'), { reply_markup: mainMenuKeyboard(lang) });
+      return;
+    }
+    const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
+    const settings = await getUserSettings(chatId);
+    const msg = formatWeatherMessage(weatherData, lang, settings);
+    if (messageId) {
+      const r = await editWithFallback(chatId, messageId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
+      if (!r.ok) {
+        const s2 = await sendWithFallback(chatId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
+        if (s2.ok) await saveUser(chatId, { last_message_id: s2.result.message_id });
+      } else {
+        await saveUser(chatId, { last_message_id: messageId });
+      }
+    }
+    await tgAnswerCallback(callbackQuery.id, t(lang, 'toast_updated'));
     return;
   }
 
@@ -1319,7 +1477,9 @@ async function handleMessage(message) {
   if (text === '/start' || text === '/help') {
     let user = await getUser(chatId);
     if (!user) {
-      await saveUser(chatId, { enabled: true, language: 'uk' });
+      const tgLang = (message.from?.language_code || '').split('-')[0];
+      const lang = SUPPORTED_LANGS.includes(tgLang) ? tgLang : 'uk';
+      await saveUser(chatId, { enabled: true, language: lang });
       user = await getUser(chatId);
     }
     const lang = user?.language || 'uk';
@@ -1671,4 +1831,11 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, async () => {
   console.log(`Rain Alert Bot running on port ${PORT}`);
   initDB();
+
+  // Anti-sleep: ping own /health every 5 min so PandaStack scale-to-zero keeps container awake
+  const PUBLIC_URL = process.env.PUBLIC_URL || 'https://rain-alert-bot.pandastack.app';
+  setInterval(() => {
+    fetch(`${PUBLIC_URL}/health`).catch(() => {});
+  }, 5 * 60 * 1000);
+  console.log(`Self-ping enabled: ${PUBLIC_URL}`);
 });
