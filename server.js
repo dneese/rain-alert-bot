@@ -616,7 +616,68 @@ async function fetchWeatherAPI(lat, lon, apiKey) {
       probability: h.chance_of_rain,
       precip_mm: h.precip_mm,
       temp_c: h.temp_c,
+      humidity: h.humidity,
+      wind_kph: h.wind_kph,
     }));
+}
+
+async function fetchOWM(lat, lon, apiKey) {
+  const key = apiKey || OWM_KEY;
+  if (!key) return null;
+  const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&units=metric&appid=${key}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`OWM: ${res.status}`);
+  const data = await res.json();
+  const now = Date.now();
+  return (data.list || [])
+    .filter(item => item.dt * 1000 >= now - 3600000)
+    .map(item => ({
+      time: new Date(item.dt * 1000).toISOString().replace('.000Z', ''),
+      ms: item.dt * 1000,
+      probability: Math.round((item.pop || 0) * 100),
+      precip_mm: item.rain?.['3h'] ? item.rain['3h'] / 3 : (item.snow?.['3h'] ? item.snow['3h'] / 3 : 0),
+      temp_c: item.main?.temp ?? null,
+      humidity: item.main?.humidity ?? null,
+      wind_kph: item.wind?.speed ? item.wind.speed * 3.6 : null,
+      description: item.weather?.[0]?.description || '',
+      weather_id: item.weather?.[0]?.id ?? null,
+    }));
+}
+
+async function fetchRainbowWeather(lat, lon, apiKey) {
+  const key = apiKey || RAINBOW_KEY;
+  if (!key) return null;
+  const url = `https://api.rainbow.ai/weather/v1/one-call?lat=${lat}&lon=${lon}&unit=metric`;
+  const res = await fetch(url, {
+    headers: { 'x-api-key': key },
+  });
+  if (!res.ok) throw new Error(`Rainbow: ${res.status}`);
+  const data = await res.json();
+  const now = Date.now();
+  const current = data.current || {};
+  const hourly = (data.hourly || [])
+    .filter(h => h.dt * 1000 >= now - 3600000)
+    .map(h => ({
+      time: new Date(h.dt * 1000).toISOString().replace('.000Z', ''),
+      ms: h.dt * 1000,
+      probability: Math.round((h.pop || 0) * 100),
+      precip_mm: h.rain?.['1h'] || 0,
+      temp_c: h.temp ?? null,
+      humidity: h.humidity ?? null,
+      wind_kph: h.wind_speed ? h.wind_speed * 3.6 : null,
+      weather_id: h.weather?.[0]?.id ?? null,
+    }));
+  return {
+    current: {
+      temp_c: current.temp ?? null,
+      humidity: current.humidity ?? null,
+      precipitation_mm: current.rain?.['1h'] || 0,
+      wind_speed: current.wind_speed ? current.wind_speed * 3.6 : null,
+      weather_id: current.weather?.[0]?.id ?? null,
+      is_raining: (current.rain?.['1h'] || 0) > 0.1,
+    },
+    hourly,
+  };
 }
 
 async function getRainForecast(lat, lon, chatId) {
@@ -629,19 +690,27 @@ async function getRainForecast(lat, lon, chatId) {
     radar: { is_raining: false, intensity: 0 },
     source: 'none',
     isRaining: false,
+    sourcesChecked: [],
+    rainVotes: 0,
   };
 
-  // 1. Open-Meteo: current + minutely_15 + hourly (PRIMARY - free, reliable)
+  // === PHASE 1: Collect data from ALL sources ===
+
+  // 1a. Open-Meteo: current + minutely_15 + hourly (PRIMARY - free, reliable)
+  let openMeteoData = null;
   try {
-    const om = await fetchOpenMeteoFull(lat, lon);
-    result.current = om.current;
-    result.minutely = om.minutely;
-    result.forecast = om.hourly;
-    result.daily = om.daily;
+    openMeteoData = await fetchOpenMeteoFull(lat, lon);
+    result.current = openMeteoData.current;
+    result.minutely = openMeteoData.minutely;
+    result.forecast = openMeteoData.hourly;
+    result.daily = openMeteoData.daily;
     result.source = 'Open-Meteo';
-    result.isRaining = om.current.is_raining;
-    result.nowLocalMs = om.nowLocalMs;
-    result.tzOffsetMs = om.tzOffsetMs;
+    result.isRaining = openMeteoData.current.is_raining;
+    result.nowLocalMs = openMeteoData.nowLocalMs;
+    result.tzOffsetMs = openMeteoData.tzOffsetMs;
+    result.sourcesChecked.push('Open-Meteo');
+    if (openMeteoData.current.is_raining) result.rainVotes++;
+    console.log(`[RainCascade] Open-Meteo: isRaining=${openMeteoData.current.is_raining}, precip=${openMeteoData.current.precipitation_mm}mm, code=${openMeteoData.current.weather_code}`);
   } catch (e) {
     console.warn('Open-Meteo failed:', e.message);
   }
@@ -656,6 +725,9 @@ async function getRainForecast(lat, lon, chatId) {
       result.isRaining = met.current.is_raining;
       result.nowLocalMs = Date.now();
       result.tzOffsetMs = 0;
+      result.sourcesChecked.push('MET Norway');
+      if (met.current.is_raining) result.rainVotes++;
+      console.log(`[RainCascade] MET Norway: isRaining=${met.current.is_raining}, precip=${met.current.precipitation_mm}mm`);
     } catch (e) {
       console.warn('MET Norway failed:', e.message);
     }
@@ -671,14 +743,22 @@ async function getRainForecast(lat, lon, chatId) {
   result.lat = lat;
   result.lon = lon;
 
-  // 2. RainViewer: real-time radar (FREE, no key) — SUPPLEMENTARY only
+  // 1d. Ensure nowLocalMs is set even if Open-Meteo failed
+  if (!result.nowLocalMs) {
+    result.nowLocalMs = Date.now();
+    result.tzOffsetMs = 0;
+  }
+
+  // 2. RainViewer: real-time radar (FREE, no key) — INDEPENDENT source
   try {
     result.radar = await fetchRainViewer(lat, lon);
     if (result.radar.stale) console.warn('RainViewer radar data is stale');
-    // Radar ONLY confirms rain if Open-Meteo ALREADY shows rain signs
-    // Don't let radar alone trigger isRaining (causes false positives)
-    if (result.radar.is_raining && (result.isRaining || result.current?.precipitation_mm > 0)) {
-      result.isRaining = true;
+    result.sourcesChecked.push('RainViewer');
+    if (result.radar.is_raining) {
+      result.rainVotes++;
+      console.log(`[RainCascade] RainViewer: is_raining=true, intensity=${result.radar.intensity}`);
+    } else {
+      console.log(`[RainCascade] RainViewer: no rain detected`);
     }
   } catch (e) {
     console.warn('RainViewer failed:', e.message);
@@ -686,40 +766,94 @@ async function getRainForecast(lat, lon, chatId) {
 
   // 3. Check minutely_15 for recent/upcoming rain even if current is dry
   const next30minMs = result.nowLocalMs + 30 * 60 * 1000;
-  const recentRain = result.minutely.some(m => {
-    return m.ms >= result.nowLocalMs && m.ms <= next30minMs && m.precip_mm > 0.1;
+  const past15minMs = result.nowLocalMs - 15 * 60 * 1000;
+  const recentOrSoonRain = result.minutely.some(m => {
+    return m.ms >= past15minMs && m.ms <= next30minMs && m.precip_mm > 0.1;
   });
-  if (recentRain) result.isRaining = true;
+  if (recentOrSoonRain) {
+    if (!result.isRaining) result.rainVotes++;
+    result.isRaining = true;
+    console.log(`[RainCascade] Minutely: rain detected in ±30min window`);
+  }
 
-  // 4. WeatherAPI/OWM/Rainbow: supplementary (only if user has keys)
-  if (chatId && !result.isRaining) {
-    const providers = ['weatherapi', 'owm', 'rainbow'];
+  // 4. WeatherAPI/OWM/Rainbow: supplementary — ALWAYS check, not just when dry
+  if (chatId) {
+    const providers = [
+      { name: 'weatherapi', fn: fetchWeatherAPI },
+      { name: 'owm', fn: fetchOWM },
+      { name: 'rainbow', fn: fetchRainbowWeather },
+    ];
     for (const p of providers) {
       try {
-        const key = await getUserApiKey(chatId, p);
+        const key = await getUserApiKey(chatId, p.name);
         if (!key) continue;
-        if (p === 'weatherapi') {
-          const wa = await fetchWeatherAPI(lat, lon, key);
+
+        if (p.name === 'weatherapi') {
+          const wa = await p.fn(lat, lon, key);
           if (wa) {
+            result.sourcesChecked.push('WeatherAPI');
             const hasRain = wa.some(f => {
-              const fUtcMs = new Date(f.time + 'Z').getTime() - 10800000;
-              const diff = (fUtcMs - result.nowLocalMs) / (1000 * 60);
+              const fMs = new Date(f.time).getTime();
+              const diff = (fMs - result.nowLocalMs) / (1000 * 60);
               return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
             });
             if (hasRain) {
-              result.forecast = wa;
-              result.source = 'WeatherAPI';
-              result.isRaining = true;
-              break;
+              result.rainVotes++;
+              console.log(`[RainCascade] WeatherAPI: rain detected`);
+            } else {
+              console.log(`[RainCascade] WeatherAPI: no rain`);
+            }
+          }
+        } else if (p.name === 'owm') {
+          const owmData = await p.fn(lat, lon, key);
+          if (owmData) {
+            result.sourcesChecked.push('OWM');
+            const hasRain = owmData.some(f => {
+              const diff = (f.ms - result.nowLocalMs) / (1000 * 60);
+              return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
+            });
+            if (hasRain) {
+              result.rainVotes++;
+              console.log(`[RainCascade] OWM: rain detected`);
+            } else {
+              console.log(`[RainCascade] OWM: no rain`);
+            }
+          }
+        } else if (p.name === 'rainbow') {
+          const rb = await p.fn(lat, lon, key);
+          if (rb) {
+            result.sourcesChecked.push('Rainbow');
+            if (rb.current?.is_raining) {
+              result.rainVotes++;
+              console.log(`[RainCascade] Rainbow: rain detected (current)`);
+            } else {
+              const hasRainSoon = rb.hourly?.some(f => {
+                const diff = (f.ms - result.nowLocalMs) / (1000 * 60);
+                return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
+              });
+              if (hasRainSoon) {
+                result.rainVotes++;
+                console.log(`[RainCascade] Rainbow: rain in forecast`);
+              } else {
+                console.log(`[RainCascade] Rainbow: no rain`);
+              }
             }
           }
         }
       } catch (e) {
-        console.warn(`${p} failed:`, e.message);
+        console.warn(`${p.name} failed:`, e.message);
       }
     }
   }
 
+  // === PHASE 2: Aggregate votes into final decision ===
+  // ANY source detecting rain means isRaining = true
+  // This is the key fix: rainVotes accumulate from ALL sources, not just Open-Meteo
+  if (result.rainVotes > 0 && !result.isRaining) {
+    result.isRaining = true;
+  }
+
+  console.log(`[RainCascade] FINAL: isRaining=${result.isRaining}, votes=${result.rainVotes}, sources=[${result.sourcesChecked.join(', ')}]`);
   return result;
 }
 
@@ -928,8 +1062,11 @@ function formatWeatherMessage(weatherData, lang, settings) {
 
   // ===== SHARED: footer =====
   const footerParts = [t(lang, 'updated_at', { time: nowTimeStr })];
-  if (source) footerParts.push(source);
-  if (radar?.is_raining && isRaining) footerParts.push('📡 Radar');
+  if (weatherData.sourcesChecked?.length) {
+    footerParts.push(weatherData.sourcesChecked.join(' + '));
+  } else if (source) {
+    footerParts.push(source);
+  }
 
   // ===== SHARED: daily sun times =====
   let dailyLine = null;
