@@ -12,6 +12,8 @@ ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS show_minutely BOOLEAN DEFAULT
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS show_hourly BOOLEAN DEFAULT true;
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS show_current BOOLEAN DEFAULT true;
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS show_radar BOOLEAN DEFAULT true;
+ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS early_warn_hours INTEGER DEFAULT NULL;
+ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS last_advance_warn_ms BIGINT DEFAULT NULL;
 
 -- Multi-location table
 CREATE TABLE IF NOT EXISTS user_locations (

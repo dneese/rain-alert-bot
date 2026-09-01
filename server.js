@@ -912,6 +912,21 @@ function formatTime(timeStr) {
   return '??:??';
 }
 
+// Human duration "Nд Nгод" / "Nгод Nхв" / "Nхв" (without leading preposition)
+function formatRainETA(msUntil, lang) {
+  const totalMin = Math.max(0, Math.round(msUntil / 60000));
+  if (totalMin < 60) return t(lang, 'dur_minutes', { minutes: totalMin });
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const minutes = totalMin % 60;
+  if (days > 0) {
+    if (hours > 0) return t(lang, 'dur_days_hours', { days, hours });
+    return t(lang, 'dur_days', { days });
+  }
+  if (minutes > 0) return t(lang, 'dur_hours_minutes', { hours, minutes });
+  return t(lang, 'dur_hours', { hours });
+}
+
 function formatDate(timeStr, lang, tzOffsetMs) {
   if (!timeStr) return '';
   const datePart = timeStr.split('T')[0];
@@ -946,11 +961,11 @@ function formatWeatherMessage(weatherData, lang, settings) {
   } else {
     const nextRain = minutely?.find(m => m.precip_mm > 0.1 && m.ms > nowLocalMs);
     if (nextRain) {
-      headerText = `🌧 ${t(lang, 'alert_rain_in_minutes', { minutes: Math.round((nextRain.ms - nowLocalMs) / 60000) })}`;
+      headerText = `🌧 ${t(lang, 'alert_rain_in_time', { time: formatRainETA(nextRain.ms - nowLocalMs, lang) })}`;
     } else {
       const rainInForecast = forecast?.find(f => f.precip_mm > 0.2 && f.ms > nowLocalMs);
       if (rainInForecast) {
-        headerText = `🌧 ${t(lang, 'alert_rain_in_hours', { hours: Math.round((rainInForecast.ms - nowLocalMs) / 3600000) })}`;
+        headerText = `🌧 ${t(lang, 'alert_rain_in_time', { time: formatRainETA(rainInForecast.ms - nowLocalMs, lang) })}`;
       } else {
         headerText = t(lang, 'no_rain_header');
       }
@@ -1381,13 +1396,18 @@ async function handleCallbackQuery(callbackQuery) {
 
   if (data.startsWith('cb_set_earlywarn_')) {
     const val = parseInt(data.replace('cb_set_earlywarn_', ''));
-    await saveUserSettings(chatId, { early_warn_hours: val === 0 ? null : val });
-    const u = await getUser(chatId);
+    const u = await getUser(chatId).catch(() => null);
     const uLang = u?.language || 'uk';
-    const settings = await getUserSettings(chatId);
-    await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : t(uLang, 'early_warn_hours', { hours: val }));
-    const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'early_warn_hours', { hours: val })}</b>`;
-    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    try {
+      await saveUserSettings(chatId, { early_warn_hours: val === 0 ? null : val });
+      const settings = await getUserSettings(chatId);
+      await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : t(uLang, 'early_warn_hours', { hours: val }));
+      const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'early_warn_hours', { hours: val })}</b>`;
+      await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    } catch (err) {
+      console.error(`Early warn save error for ${chatId}:`, err.message);
+      await tgAnswerCallback(callbackQuery.id, '❌').catch(() => {});
+    }
     return;
   }
 
