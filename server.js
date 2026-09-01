@@ -513,7 +513,7 @@ async function fetchRainViewer(lat, lon) {
 
   if (ageMinutes > 30) return { is_raining: false, intensity: 0, stale: true };
 
-  const zoom = 8;
+  const zoom = 10;
   const latRad = lat * Math.PI / 180;
   const n = Math.pow(2, zoom);
   const x = Math.floor((lon + 180) / 360 * n);
@@ -691,7 +691,7 @@ async function getRainForecast(lat, lon, chatId) {
     source: 'none',
     isRaining: false,
     sourcesChecked: [],
-    rainVotes: 0,
+    rainSignals: [],       // which independent sources report rain (dedup by provider name)
   };
 
   // === PHASE 1: Collect data from ALL sources ===
@@ -705,12 +705,13 @@ async function getRainForecast(lat, lon, chatId) {
     result.forecast = openMeteoData.hourly;
     result.daily = openMeteoData.daily;
     result.source = 'Open-Meteo';
-    result.isRaining = openMeteoData.current.is_raining;
     result.nowLocalMs = openMeteoData.nowLocalMs;
     result.tzOffsetMs = openMeteoData.tzOffsetMs;
     result.sourcesChecked.push('Open-Meteo');
-    if (openMeteoData.current.is_raining) result.rainVotes++;
-    console.log(`[RainCascade] Open-Meteo: isRaining=${openMeteoData.current.is_raining}, precip=${openMeteoData.current.precipitation_mm}mm, code=${openMeteoData.current.weather_code}`);
+    if (openMeteoData.current.is_raining) {
+      result.rainSignals.push('Open-Meteo-current');
+    }
+    console.log(`[RainCascade] Open-Meteo: current.is_raining=${openMeteoData.current.is_raining}, precip=${openMeteoData.current.precipitation_mm}mm, rain=${openMeteoData.current.rain_mm}mm, code=${openMeteoData.current.weather_code}`);
   } catch (e) {
     console.warn('Open-Meteo failed:', e.message);
   }
@@ -722,12 +723,11 @@ async function getRainForecast(lat, lon, chatId) {
       result.current = met.current;
       result.forecast = met.hourly;
       result.source = 'MET Norway';
-      result.isRaining = met.current.is_raining;
       result.nowLocalMs = Date.now();
       result.tzOffsetMs = 0;
       result.sourcesChecked.push('MET Norway');
-      if (met.current.is_raining) result.rainVotes++;
-      console.log(`[RainCascade] MET Norway: isRaining=${met.current.is_raining}, precip=${met.current.precipitation_mm}mm`);
+      if (met.current.is_raining) result.rainSignals.push('MET-current');
+      console.log(`[RainCascade] MET Norway: current.is_raining=${met.current.is_raining}, precip=${met.current.precipitation_mm}mm`);
     } catch (e) {
       console.warn('MET Norway failed:', e.message);
     }
@@ -754,26 +754,23 @@ async function getRainForecast(lat, lon, chatId) {
     result.radar = await fetchRainViewer(lat, lon);
     if (result.radar.stale) console.warn('RainViewer radar data is stale');
     result.sourcesChecked.push('RainViewer');
-    if (result.radar.is_raining) {
-      result.rainVotes++;
-      console.log(`[RainCascade] RainViewer: is_raining=true, intensity=${result.radar.intensity}`);
+    if (result.radar.is_raining && result.radar.intensity >= 3) {
+      result.rainSignals.push('RainViewer-strong');
+      console.log(`[RainCascade] RainViewer: strong rain, intensity=${result.radar.intensity}`);
     } else {
-      console.log(`[RainCascade] RainViewer: no rain detected`);
+      console.log(`[RainCascade] RainViewer: weak/no rain, intensity=${result.radar.intensity}`);
     }
   } catch (e) {
     console.warn('RainViewer failed:', e.message);
   }
 
-  // 3. Check minutely_15 for recent/upcoming rain even if current is dry
-  const next30minMs = result.nowLocalMs + 30 * 60 * 1000;
-  const past15minMs = result.nowLocalMs - 15 * 60 * 1000;
-  const recentOrSoonRain = result.minutely.some(m => {
-    return m.ms >= past15minMs && m.ms <= next30minMs && m.precip_mm > 0.1;
-  });
-  if (recentOrSoonRain) {
-    if (!result.isRaining) result.rainVotes++;
-    result.isRaining = true;
-    console.log(`[RainCascade] Minutely: rain detected in ±30min window`);
+  // 3. Minutely_15: upcoming rain is "soon", handled by header. Do NOT flip "raining now".
+  // Only counts as a vote if there is actual precipitation in the next 60 min.
+  const next60minMs = result.nowLocalMs + 60 * 60 * 1000;
+  const soonRain = result.minutely.some(m => m.ms > result.nowLocalMs && m.ms <= next60minMs && m.precip_mm > 0.1);
+  if (soonRain) {
+    result.rainSignals.push('Open-Meteo-minutely');
+    console.log(`[RainCascade] Open-Meteo minutely: rain within 60 min`);
   }
 
   // 4. WeatherAPI/OWM/Rainbow: supplementary — ALWAYS check, not just when dry
@@ -793,13 +790,13 @@ async function getRainForecast(lat, lon, chatId) {
           if (wa) {
             result.sourcesChecked.push('WeatherAPI');
             const hasRain = wa.some(f => {
-              const fMs = new Date(f.time).getTime();
+              const fMs = new Date(f.time.replace(' ', 'T') + 'Z').getTime() - (result.tzOffsetMs || 0);
               const diff = (fMs - result.nowLocalMs) / (1000 * 60);
-              return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
+              return diff <= 60 && diff >= -30 && f.precip_mm > 0.3;
             });
             if (hasRain) {
-              result.rainVotes++;
-              console.log(`[RainCascade] WeatherAPI: rain detected`);
+              result.rainSignals.push('WeatherAPI');
+              console.log(`[RainCascade] WeatherAPI: rain in +60/-30min window`);
             } else {
               console.log(`[RainCascade] WeatherAPI: no rain`);
             }
@@ -810,11 +807,11 @@ async function getRainForecast(lat, lon, chatId) {
             result.sourcesChecked.push('OWM');
             const hasRain = owmData.some(f => {
               const diff = (f.ms - result.nowLocalMs) / (1000 * 60);
-              return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
+              return diff <= 60 && diff >= -30 && f.precip_mm > 0.3;
             });
             if (hasRain) {
-              result.rainVotes++;
-              console.log(`[RainCascade] OWM: rain detected`);
+              result.rainSignals.push('OWM');
+              console.log(`[RainCascade] OWM: rain in +60/-30min window`);
             } else {
               console.log(`[RainCascade] OWM: no rain`);
             }
@@ -824,15 +821,15 @@ async function getRainForecast(lat, lon, chatId) {
           if (rb) {
             result.sourcesChecked.push('Rainbow');
             if (rb.current?.is_raining) {
-              result.rainVotes++;
+              result.rainSignals.push('Rainbow-current');
               console.log(`[RainCascade] Rainbow: rain detected (current)`);
             } else {
               const hasRainSoon = rb.hourly?.some(f => {
                 const diff = (f.ms - result.nowLocalMs) / (1000 * 60);
-                return diff <= 60 && diff >= -30 && f.precip_mm > 0.2;
+                return diff <= 60 && diff >= -30 && f.precip_mm > 0.3;
               });
               if (hasRainSoon) {
-                result.rainVotes++;
+                result.rainSignals.push('Rainbow');
                 console.log(`[RainCascade] Rainbow: rain in forecast`);
               } else {
                 console.log(`[RainCascade] Rainbow: no rain`);
@@ -846,14 +843,25 @@ async function getRainForecast(lat, lon, chatId) {
     }
   }
 
-  // === PHASE 2: Aggregate votes into final decision ===
-  // ANY source detecting rain means isRaining = true
-  // This is the key fix: rainVotes accumulate from ALL sources, not just Open-Meteo
-  if (result.rainVotes > 0 && !result.isRaining) {
+  // === PHASE 2: Form a consensus opinion ===
+  // A single strong, real-time observation is enough by itself:
+  //   - Open-Meteo / MET current (WMO code or measured precip) = measured rain now
+  //   - Radar intensity >= 4 = heavy precipitation overhead right now
+  // Otherwise require at least 2 INDEPENDENT sources agreeing on rain,
+  // so one noisy forecast provider cannot trigger a false "it is raining now".
+  const strongCurrent =
+    result.rainSignals.includes('Open-Meteo-current') ||
+    result.rainSignals.includes('MET-current') ||
+    result.rainSignals.includes('RainViewer-strong');
+  const independentVotes = new Set(result.rainSignals).size;
+
+  if (strongCurrent) {
+    result.isRaining = true;
+  } else if (independentVotes >= 2) {
     result.isRaining = true;
   }
 
-  console.log(`[RainCascade] FINAL: isRaining=${result.isRaining}, votes=${result.rainVotes}, sources=[${result.sourcesChecked.join(', ')}]`);
+  console.log(`[RainCascade] FINAL: isRaining=${result.isRaining}, signals=[${result.rainSignals.join(', ')}], independentVotes=${independentVotes}, sources=[${result.sourcesChecked.join(', ')}]`);
   return result;
 }
 
