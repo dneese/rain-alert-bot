@@ -224,8 +224,10 @@ function advancedSettingsKeyboard(lang, settings) {
   const windOn = s.wind_threshold_kmh != null;
   const humOn = s.humidity_threshold_pct != null;
   const tempOn = s.temp_threshold_c != null;
+  const earlyWarnH = s.early_warn_hours ? Number(s.early_warn_hours) : 0;
   return {
     inline_keyboard: [
+      [{ text: `🔔 ${t(lang, 'set_early_warn')}: ${earlyWarnH ? t(lang, 'early_warn_hours', { hours: earlyWarnH }) : t(lang, 'off')}`, callback_data: 'cb_adv_earlywarn' }],
       [{ text: `🔕 ${t(lang, 'set_quiet_hours')}: ${qhOn ? s.quiet_hours_start + '-' + s.quiet_hours_end : t(lang, 'off')}`, callback_data: 'cb_adv_quiet' }],
       [{ text: `💨 ${t(lang, 'set_wind_threshold')}: ${windOn ? '>'+s.wind_threshold_kmh+'км/год' : t(lang, 'off')}`, callback_data: 'cb_adv_wind' }],
       [{ text: `💧 ${t(lang, 'set_humidity_threshold')}: ${humOn ? '>'+s.humidity_threshold_pct+'%' : t(lang, 'off')}`, callback_data: 'cb_adv_humidity' }],
@@ -295,6 +297,18 @@ function tempThresholdKeyboard(lang) {
     inline_keyboard: [
       options.map(v => ({ text: `<${v}°C`, callback_data: `cb_set_temp_${v}` })),
       [{ text: t(lang, 'btn_disable'), callback_data: 'cb_set_temp_999' }],
+      [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
+    ],
+  };
+}
+
+function earlyWarnKeyboard(lang, settings) {
+  const s = settings || {};
+  const options = [3, 6, 12, 24, 48];
+  return {
+    inline_keyboard: [
+      options.map(v => ({ text: t(lang, 'early_warn_hours', { hours: v }), callback_data: `cb_set_earlywarn_${v}` })),
+      [{ text: t(lang, 'btn_disable'), callback_data: 'cb_set_earlywarn_0' }],
       [{ text: t(lang, 'btn_back'), callback_data: 'cb_adv_settings' }],
     ],
   };
@@ -372,7 +386,7 @@ const WMO_CODES = {
 
 // Open-Meteo: current + minutely_15 + hourly in ONE call
 async function fetchOpenMeteoFull(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m,weather_code&daily=sunrise,sunset,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto&forecast_days=2`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m&minutely_15=precipitation,precipitation_probability&hourly=precipitation_probability,precipitation,temperature_2m,wind_speed_10m,weather_code&daily=sunrise,sunset,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto&forecast_days=3`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo: ${res.status}`);
   const data = await res.json();
@@ -1356,6 +1370,27 @@ async function handleCallbackQuery(callbackQuery) {
     return;
   }
 
+  if (data === 'cb_adv_earlywarn') {
+    const settings = await getUserSettings(chatId);
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const msg = `<b>🔔 ${t(uLang, 'set_early_warn')}</b>\n\n${t(uLang, 'set_early_warn_desc')}.`;
+    await editWithFallback(chatId, messageId, msg, { reply_markup: earlyWarnKeyboard(uLang, settings) });
+    return;
+  }
+
+  if (data.startsWith('cb_set_earlywarn_')) {
+    const val = parseInt(data.replace('cb_set_earlywarn_', ''));
+    await saveUserSettings(chatId, { early_warn_hours: val === 0 ? null : val });
+    const u = await getUser(chatId);
+    const uLang = u?.language || 'uk';
+    const settings = await getUserSettings(chatId);
+    await tgAnswerCallback(callbackQuery.id, val === 0 ? t(uLang, 'off') : t(uLang, 'early_warn_hours', { hours: val }));
+    const msg = val === 0 ? `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'off')}</b>` : `<b>✅ ${t(uLang, 'set_early_warn')}: ${t(uLang, 'early_warn_hours', { hours: val })}</b>`;
+    await editWithFallback(chatId, messageId, msg, { reply_markup: advancedSettingsKeyboard(uLang, settings) });
+    return;
+  }
+
   if (data.startsWith('cb_qh_start_')) {
     const startHour = parseInt(data.replace('cb_qh_start_', ''));
     const u = await getUser(chatId);
@@ -1923,6 +1958,35 @@ async function checkAllUsers() {
             last_message_id: sendResult.result.message_id,
           });
           alertsSent++;
+        }
+      }
+      // Round up: advance warning for rain hours/days ahead (once per rain event)
+      const earlyWarnH = Number(settings?.early_warn_hours) || 0;
+      if (earlyWarnH > 0 && weatherData.forecast?.length) {
+        const earlyWarnHorizon = weatherData.nowLocalMs + earlyWarnH * 3600 * 1000;
+        const advanceGapMs = Math.max(lookaheadMs, 60 * 60 * 1000);
+        let earliestRainStart = null;
+        for (const h of weatherData.forecast) {
+          if (h.ms > weatherData.nowLocalMs + advanceGapMs && h.ms <= earlyWarnHorizon && h.precip_mm >= threshold) {
+            if (earliestRainStart === null || h.ms < earliestRainStart) earliestRainStart = h.ms;
+          }
+        }
+        if (earliestRainStart) {
+          const lastAdvanceWarn = Number(settings.last_advance_warn_ms) || 0;
+          const alreadyWarned = lastAdvanceWarn > 0 && Math.abs(earliestRainStart - lastAdvanceWarn) < 30 * 60 * 1000;
+          if (!alreadyWarned) {
+            const advItem = weatherData.forecast.find(h => h.ms === earliestRainStart);
+            const hoursAway = Math.round((earliestRainStart - weatherData.nowLocalMs) / 3600000);
+            const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs);
+            const advTime = formatTime(advItem.timeStr);
+            const recAdv = settings?.posture === 'outside' ? t(lang, 'advance_rain_outside') : t(lang, 'advance_rain_inside');
+            const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
+            const advSend = await sendWithFallback(user.chat_id, advMsg, {});
+            if (advSend.ok) {
+              await saveUserSettings(user.chat_id, { last_advance_warn_ms: earliestRainStart });
+              alertsSent++;
+            }
+          }
         }
       }
     } catch (err) {
