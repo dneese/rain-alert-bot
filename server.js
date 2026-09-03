@@ -447,6 +447,30 @@ async function fetchOpenMeteoFull(lat, lon) {
   return { current, minutely, hourly, daily, timezone: data.timezone, tzOffsetMs: tzOffsetSec * 1000, nowLocalMs };
 }
 
+// Lightweight timezone resolver for fallback sources.
+// Open-Meteo forecast may occasionally fail while its /v1/forecast (timezone-only)
+// call still works; we use it to get a correct utc_offset_seconds so that
+// fallback providers (MET Norway, etc.) can display LOCAL time instead of UTC.
+const tzCache = new Map();
+async function getTzOffsetSec(lat, lon) {
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  if (tzCache.has(key)) return tzCache.get(key);
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m&timezone=auto&forecast_days=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const data = await res.json();
+      const offset = data.utc_offset_seconds || 0;
+      tzCache.set(key, offset);
+      return offset;
+    }
+  } catch (e) {}
+  // Fallback estimate by longitude: ~1h per 15° (no DST correction, best-effort)
+  const est = Math.round(lon / 15) * 3600;
+  tzCache.set(key, est);
+  return est;
+}
+
 // Open-Meteo Air Quality API: European AQI + UV index (+ pollen for Europe)
 // Separate endpoint = separate free quota (10k/day), doesn't touch forecast limits
 async function fetchAirQuality(lat, lon) {
@@ -738,7 +762,7 @@ async function getRainForecast(lat, lon, chatId) {
       result.forecast = met.hourly;
       result.source = 'MET Norway';
       result.nowLocalMs = Date.now();
-      result.tzOffsetMs = 0;
+      result.tzOffsetMs = (await getTzOffsetSec(lat, lon)) * 1000;
       result.sourcesChecked.push('MET Norway');
       if (met.current.is_raining) result.rainSignals.push('MET-current');
       console.log(`[RainCascade] MET Norway: current.is_raining=${met.current.is_raining}, precip=${met.current.precipitation_mm}mm`);
@@ -760,7 +784,7 @@ async function getRainForecast(lat, lon, chatId) {
   // 1d. Ensure nowLocalMs is set even if Open-Meteo failed
   if (!result.nowLocalMs) {
     result.nowLocalMs = Date.now();
-    result.tzOffsetMs = 0;
+    result.tzOffsetMs = (await getTzOffsetSec(lat, lon)) * 1000;
   }
 
   // 2. RainViewer: real-time radar (FREE, no key) — INDEPENDENT source
@@ -912,6 +936,15 @@ function formatTime(timeStr) {
   return '??:??';
 }
 
+// Build a LOCAL wall-clock "HH:MM" from an absolute epoch ms and tz offset.
+// Works consistently for every provider (Open-Meteo and MET Norway alike),
+// so forecast rows always show local time instead of UTC.
+function localTimeStr(ms, tzOffsetMs) {
+  if (!ms) return '??:??';
+  const d = new Date(ms + (tzOffsetMs || 0));
+  return `${d.getUTCHours().toString().padStart(2, '0')}:${d.getUTCMinutes().toString().padStart(2, '0')}`;
+}
+
 // Human duration "Nд Nгод" / "Nгод Nхв" / "Nхв" (without leading preposition)
 function formatRainETA(msUntil, lang) {
   const totalMin = Math.max(0, Math.round(msUntil / 60000));
@@ -927,9 +960,17 @@ function formatRainETA(msUntil, lang) {
   return t(lang, 'dur_hours', { hours });
 }
 
-function formatDate(timeStr, lang, tzOffsetMs) {
-  if (!timeStr) return '';
-  const datePart = timeStr.split('T')[0];
+function formatDate(timeStr, lang, tzOffsetMs, ms) {
+  // Local date (YYYY-MM-DD) from an absolute epoch + tz offset, falling back
+  // to the provider's date string when ms is unavailable.
+  let datePart = null;
+  if (ms) {
+    const local = new Date(ms + (tzOffsetMs || 0));
+    datePart = local.toISOString().split('T')[0];
+  } else if (timeStr) {
+    datePart = timeStr.split('T')[0];
+  }
+  if (!datePart) return '';
   const nowLocal = new Date(Date.now() + (tzOffsetMs || 0));
   const todayStr = nowLocal.toISOString().split('T')[0];
   const tomorrowStr = new Date(nowLocal.getTime() + 86400000).toISOString().split('T')[0];
@@ -993,7 +1034,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   let minRows = [];
   if (minutely && minutely.length > 0 && settings?.show_minutely !== false) {
     for (const m of minutely.slice(0, 8)) {
-      const time = m.timeStr.split('T')[1];
+      const time = localTimeStr(m.ms, tzOffsetMs);
       const emoji = m.precip_mm > 2 ? '🌧' : m.precip_mm > 0.1 ? '🌦' : '☀️';
       const bar = makePrecipBar(m.precip_mm);
       const precip = m.precip_mm > 0 ? ` ${m.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
@@ -1006,12 +1047,12 @@ function formatWeatherMessage(weatherData, lang, settings) {
   if (forecast && forecast.length > 0 && settings?.show_hourly !== false) {
     let lastDate = '';
     for (const h of forecast.slice(0, 8)) {
-      const dateStr = formatDate(h.timeStr, lang, tzOffsetMs);
+      const dateStr = formatDate(h.timeStr, lang, tzOffsetMs, h.ms);
       if (dateStr !== lastDate) {
         hourGroups.push({ dateStr, rows: [] });
         lastDate = dateStr;
       }
-      const time = h.timeStr.split('T')[1];
+      const time = localTimeStr(h.ms, tzOffsetMs);
       const emoji = getWeatherEmoji(h.probability, h.precip_mm, h.wmo_code);
       const temp = h.temp_c !== null ? `${Math.round(h.temp_c)}°` : '--';
       const precip = h.precip_mm > 0 ? ` ${h.precip_mm.toFixed(1)}${t(lang, 'unit_mm')}` : '';
@@ -1997,8 +2038,8 @@ async function checkAllUsers() {
           if (!alreadyWarned) {
             const advItem = weatherData.forecast.find(h => h.ms === earliestRainStart);
             const hoursAway = Math.round((earliestRainStart - weatherData.nowLocalMs) / 3600000);
-            const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs);
-            const advTime = formatTime(advItem.timeStr);
+            const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs, advItem.ms);
+            const advTime = localTimeStr(advItem.ms, weatherData.tzOffsetMs);
             const recAdv = settings?.posture === 'outside' ? t(lang, 'advance_rain_outside') : t(lang, 'advance_rain_inside');
             const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
             const advSend = await sendWithFallback(user.chat_id, advMsg, {});
