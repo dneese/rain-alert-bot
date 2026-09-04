@@ -107,9 +107,9 @@ function settingsKeyboard(lang) {
 
 function apiKeysKeyboard(lang, activeKeys) {
   const providers = [
-    { key: 'weatherapi', label: 'WeatherAPI.com' },
+    // Only OpenWeatherMap is used as the user-supplied supplementary source.
+    // WeatherAPI and Rainbow were disabled (both in checks and here in the UI).
     { key: 'owm', label: 'OpenWeatherMap' },
-    { key: 'rainbow', label: 'Rainbow Weather' },
   ];
   const rows = providers.map(p => {
     const isActive = activeKeys.includes(p.key);
