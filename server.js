@@ -730,6 +730,7 @@ async function getRainForecast(lat, lon, chatId) {
     isRaining: false,
     sourcesChecked: [],
     rainSignals: [],       // which independent sources report rain (dedup by provider name)
+    hasOwmKey: false,      // user provided an OpenWeatherMap key => OWM is authoritative
   };
 
   // === PHASE 1: Collect data from ALL sources ===
@@ -843,13 +844,25 @@ async function getRainForecast(lat, lon, chatId) {
           const owmData = await p.fn(lat, lon, key);
           if (owmData) {
             result.sourcesChecked.push('OWM');
+            result.hasOwmKey = true;
+            // User-provided OWM key => OWM is authoritative for precipitation.
+            // Look a bit further ahead than the 60-min window so a real rain
+            // band is not missed, and treat any measured/probable precip as rain.
             const hasRain = owmData.some(f => {
               const diff = (f.ms - result.nowLocalMs) / (1000 * 60);
-              return diff <= 60 && diff >= -30 && f.precip_mm > 0.3;
+              const probRain = (f.probability || 0) >= 40;
+              return diff <= 120 && diff >= -30 && (f.precip_mm > 0.2 || probRain);
             });
             if (hasRain) {
               result.rainSignals.push('OWM');
-              console.log(`[RainCascade] OWM: rain in +60/-30min window`);
+              result.rainSignals.push('OWM-authoritative');
+              // Make sure the header reflects OWM's rain (authoritative source)
+              const alreadyShown = (result.forecast || []).some(f => f.ms > result.nowLocalMs && f.precip_mm > 0.2);
+              if (!alreadyShown) {
+                const owmSoon = owmData.find(f => f.ms > result.nowLocalMs);
+                if (owmSoon) result.forecast = [owmSoon, ...(result.forecast || [])];
+              }
+              console.log(`[RainCascade] OWM: rain in +120/-30min window (authoritative key provided)`);
             } else {
               console.log(`[RainCascade] OWM: no rain`);
             }
@@ -890,7 +903,9 @@ async function getRainForecast(lat, lon, chatId) {
   const strongCurrent =
     result.rainSignals.includes('Open-Meteo-current') ||
     result.rainSignals.includes('MET-current') ||
-    result.rainSignals.includes('RainViewer-strong');
+    result.rainSignals.includes('RainViewer-strong') ||
+    // User-provided OWM key => OWM forecast is authoritative for precip
+    result.rainSignals.includes('OWM-authoritative');
   const independentVotes = new Set(result.rainSignals).size;
 
   if (strongCurrent) {
