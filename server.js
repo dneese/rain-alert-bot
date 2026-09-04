@@ -1219,9 +1219,6 @@ function formatWeatherMessage(weatherData, lang, settings) {
     rich += `<aside>🚨 <b>${t(lang, 'severe_title')}</b></aside>` +
       severeLines.map(l => `<p>${l}</p>`).join('');
   }
-  if (weatherData.lat != null) {
-    rich += `<tg-map lat="${Number(weatherData.lat).toFixed(4)}" long="${Number(weatherData.lon).toFixed(4)}" zoom="13"/>`;
-  }
   rich += `<hr/><footer>${footerParts.join(' | ')}</footer>`;
 
   // ===== PLAIN VERSION (fallback for Telegram Web/X/macOS) =====
@@ -1676,13 +1673,7 @@ async function handleCallbackQuery(callbackQuery) {
     pendingCallbacks[chatId] = { action: 'location_name', messageId };
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await sendWithFallback(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`, {
-      reply_markup: {
-        keyboard: [[{ text: `📍 ${t(uLang, 'send_geolocation')}`, request_location: true }]],
-        one_time_keyboard: true,
-        resize_keyboard: true,
-      },
-    });
+    await sendWithFallback(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`);
     await sendWithFallback(chatId, `${t(uLang, 'location_add_prompt')}:`, {
       reply_markup: { inline_keyboard: [[{ text: t(uLang, 'btn_back'), callback_data: 'cb_adv_locations' }]] },
     });
@@ -1870,13 +1861,7 @@ async function handleMessage(message) {
       return;
     }
     pendingCallbacks[chatId] = { action: 'location_coords', name: locName, messageId: pendingCallbacks[chatId].messageId };
-    await sendWithFallback(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`, {
-      reply_markup: {
-        keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
-        one_time_keyboard: true,
-        resize_keyboard: true,
-      },
-    });
+    await sendWithFallback(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`);
     return;
   }
 
@@ -1900,13 +1885,7 @@ async function handleMessage(message) {
     }
 
     if (lat == null || lon == null) {
-      await sendWithFallback(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`, {
-        reply_markup: {
-          keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
-          one_time_keyboard: true,
-          resize_keyboard: true,
-        },
-      });
+      await sendWithFallback(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`);
       return;
     }
 
