@@ -1952,6 +1952,28 @@ async function updateAllUsers() {
   return updated;
 }
 
+// Resolve a human-friendly label for a location: prefer the user's saved
+// name from user_locations (matched by nearest coordinates), else show coords.
+async function locationLabel(chatId, lat, lon) {
+  try {
+    const locs = await getUserLocations(chatId);
+    if (locs && locs.length) {
+      let best = null, bestDist = Infinity;
+      for (const l of locs) {
+        if (l.latitude == null || l.longitude == null) continue;
+        const d = (l.latitude - lat) ** 2 + (l.longitude - lon) ** 2;
+        if (d < bestDist) { bestDist = d; best = l; }
+      }
+      if (best && bestDist < 0.0004 && best.name) {
+        return `📍 ${best.name}`;
+      }
+    }
+  } catch (e) {
+    console.warn('locationLabel failed:', e.message);
+  }
+  return `📍 ${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+}
+
 // === Cron Check: edit existing + send new ONLY on rain transition ===
 async function checkAllUsers() {
   const users = await getAllUsers();
@@ -2056,7 +2078,8 @@ async function checkAllUsers() {
             const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs, advItem.ms);
             const advTime = localTimeStr(advItem.ms, weatherData.tzOffsetMs);
             const recAdv = settings?.posture === 'outside' ? t(lang, 'advance_rain_outside') : t(lang, 'advance_rain_inside');
-            const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
+            const locLabel = await locationLabel(user.chat_id, user.latitude, user.longitude);
+            const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${locLabel}\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
             const advSend = await sendWithFallback(user.chat_id, advMsg, {});
             if (advSend.ok) {
               await saveUserSettings(user.chat_id, { last_advance_warn_ms: earliestRainStart });
