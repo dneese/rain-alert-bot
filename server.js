@@ -473,22 +473,6 @@ async function getTzOffsetSec(lat, lon) {
 
 // Open-Meteo Air Quality API: European AQI + UV index (+ pollen for Europe)
 // Separate endpoint = separate free quota (10k/day), doesn't touch forecast limits
-async function fetchAirQuality(lat, lon) {
-  const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=european_aqi,pm2_5,uv_index,grass_pollen,birch_pollen,alder_pollen&timezone=auto`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`AirQuality: ${res.status}`);
-  const d = await res.json();
-  const c = d.current || {};
-  return {
-    european_aqi: c.european_aqi,
-    pm2_5: c.pm2_5,
-    uv_index: c.uv_index,
-    grass_pollen: c.grass_pollen,
-    birch_pollen: c.birch_pollen,
-    alder_pollen: c.alder_pollen,
-  };
-}
-
 // MET Norway (api.met.no): free fallback source, no key needed, requires User-Agent.
 // Used only when Open-Meteo is down. Display times are UTC in this degraded mode;
 // alert logic stays correct because ms epochs are real UTC.
@@ -718,13 +702,27 @@ async function fetchRainbowWeather(lat, lon, apiKey) {
   };
 }
 
+// Short-lived in-process cache of completed rain forecasts, keyed by "lat,lon".
+// Avoids repeating expensive external API calls (Open-Meteo/MET/OWM/Netatmo) when
+// multiple locations/checks for the same coords run back-to-back (e.g. self-ping,
+// sequential user /check). The DB already stores per-location alert *state*; this
+// only dedupes the transient forecast fetch to cut CPU-seconds (billing) and latency.
+const rainForecastCache = new Map();
+const RAIN_FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+
 async function getRainForecast(lat, lon, chatId) {
+  const cacheKey = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  const cached = rainForecastCache.get(cacheKey);
+  if (cached && Date.now() - cached.generatedAt < RAIN_FORECAST_CACHE_MS) {
+    console.log(`[RainCascade] cache hit ${cacheKey}`);
+    return cached.result;
+  }
+
   let result = {
     current: null,
     minutely: [],
     forecast: [],
     daily: null,
-    air: null,
     radar: { is_raining: false, intensity: 0 },
     source: 'none',
     isRaining: false,
@@ -770,13 +768,6 @@ async function getRainForecast(lat, lon, chatId) {
     } catch (e) {
       console.warn('MET Norway failed:', e.message);
     }
-  }
-
-  // 1c. Air quality + UV (separate free quota, non-critical)
-  try {
-    result.air = await fetchAirQuality(lat, lon);
-  } catch (e) {
-    console.warn('AirQuality failed:', e.message);
   }
 
   result.lat = lat;
@@ -917,6 +908,12 @@ async function getRainForecast(lat, lon, chatId) {
   }
 
   console.log(`[RainCascade] FINAL: isRaining=${result.isRaining}, signals=[${result.rainSignals.join(', ')}], independentVotes=${independentVotes}, sources=[${result.sourcesChecked.join(', ')}]`);
+
+  rainForecastCache.set(cacheKey, { generatedAt: Date.now(), result });
+  if (rainForecastCache.size > 64) {
+    const oldest = rainForecastCache.keys().next().value;
+    rainForecastCache.delete(oldest);
+  }
   return result;
 }
 
@@ -1176,22 +1173,6 @@ function formatWeatherMessage(weatherData, lang, settings, label) {
     dailyLine = `🌅 ${hm(d.sunrise)} · 🌇 ${hm(d.sunset)} · ⬆️${d.tmax != null ? Math.round(d.tmax) : '--'}° ⬇️${d.tmin != null ? Math.round(d.tmin) : '--'}°`;
   }
 
-  // ===== SHARED: air quality + UV =====
-  let aqLines = [];
-  if (weatherData.air && settings?.show_air !== false) {
-    const aq = weatherData.air;
-    if (aq.european_aqi != null) {
-      const bands = [[20, 'aqi_good', '🟢'], [40, 'aqi_moderate', '🟡'], [60, 'aqi_poor', '🟠'], [80, 'aqi_unhealthy', '🔴'], [100, 'aqi_very_unhealthy', '🟣'], [Infinity, 'aqi_hazardous', '☠️']];
-      const b = bands.find(([lim]) => aq.european_aqi <= lim);
-      if (b) aqLines.push(`🌿 ${t(lang, 'aqi_label')}: ${b[2]} ${t(lang, b[1])} (${Math.round(aq.european_aqi)})`);
-    }
-    if (aq.uv_index != null) {
-      const uvIcons = [[3, '🟢'], [6, '🟡'], [8, '🟠'], [11, '🔴'], [Infinity, '🟣']];
-      const uvB = uvIcons.find(([lim]) => aq.uv_index < lim);
-      aqLines.push(`🕶 ${t(lang, 'uv_label')}: ${Math.round(aq.uv_index)} ${uvB[1]}`);
-    }
-  }
-
   // ===== RICH VERSION (Bot API 10.1+ Rich Messages) =====
   // Best practices: one clear heading, short summary, h3 sections,
   // table with caption for structured data, blockquote/aside for key statuses,
@@ -1203,10 +1184,7 @@ function formatWeatherMessage(weatherData, lang, settings, label) {
     rich += `<tr><td>${curMain[0]}</td><td>${curMain[1]}</td></tr>`;
     rich += `<tr><td>${curExtra[0] || ''}</td><td>${curExtra[1] || ''}</td></tr>`;
     if (radarLine) rich += `<tr><td colspan="2">${radarLine}</td></tr>`;
-    for (const l of aqLines) rich += `<tr><td colspan="2">${l}</td></tr>`;
     rich += `</table>`;
-  } else {
-    for (const l of aqLines) rich += `<p>${l}</p>`;
   }
   if (minRows.length) {
     rich += `<details><summary>⏱ ${t(lang, 'minutely_label')}</summary>` +
@@ -1232,9 +1210,6 @@ function formatWeatherMessage(weatherData, lang, settings, label) {
   if (curMain) {
     plain += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${curMain[0]}  ${curMain[1]}\n${curExtra.join('   ')}`;
     if (radarLine) plain += `\n${radarLine}`;
-  }
-  for (const l of aqLines) {
-    plain += `\n${l}`;
   }
   if (minRows.length) {
     plain += `\n\n⏱ <b>${t(lang, 'minutely_label')}</b>\n<pre>${minRows.join('\n')}</pre>`;
