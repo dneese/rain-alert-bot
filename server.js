@@ -1285,7 +1285,8 @@ async function handleCallbackQuery(callbackQuery) {
     }
     const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
     const settings = await getUserSettings(chatId);
-    const msg = formatWeatherMessage(weatherData, lang, settings);
+    const label = await locationLabel(chatId, u.latitude, u.longitude);
+    const msg = formatWeatherMessage(weatherData, lang, settings, label);
     const result = await sendWithFallback(chatId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -1301,7 +1302,8 @@ async function handleCallbackQuery(callbackQuery) {
     }
     const weatherData = await getRainForecast(u.latitude, u.longitude, chatId);
     const settings = await getUserSettings(chatId);
-    const msg = formatWeatherMessage(weatherData, lang, settings);
+    const label = await locationLabel(chatId, u.latitude, u.longitude);
+    const msg = formatWeatherMessage(weatherData, lang, settings, label);
     if (messageId) {
       const r = await editWithFallback(chatId, messageId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
       if (!r.ok) {
@@ -1678,7 +1680,13 @@ async function handleCallbackQuery(callbackQuery) {
     pendingCallbacks[chatId] = { action: 'location_name', messageId };
     const u = await getUser(chatId);
     const uLang = u?.language || 'uk';
-    await sendWithFallback(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`);
+    await sendWithFallback(chatId, `📍 ${t(uLang, 'location_name_prompt')}:`, {
+      reply_markup: {
+        keyboard: [[{ text: `📍 ${t(uLang, 'send_geolocation')}`, request_location: true }]],
+        one_time_keyboard: true,
+        resize_keyboard: true,
+      },
+    });
     await sendWithFallback(chatId, `${t(uLang, 'location_add_prompt')}:`, {
       reply_markup: { inline_keyboard: [[{ text: t(uLang, 'btn_back'), callback_data: 'cb_adv_locations' }]] },
     });
@@ -1795,7 +1803,8 @@ async function handleMessage(message) {
     }
     const weatherData = await getRainForecast(user.latitude, user.longitude, chatId);
     const settings = await getUserSettings(chatId);
-    const msg = formatWeatherMessage(weatherData, lang, settings);
+    const label = await locationLabel(chatId, user.latitude, user.longitude);
+    const msg = formatWeatherMessage(weatherData, lang, settings, label);
     const result = await sendWithFallback(chatId, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
     if (result.ok) {
       await saveUser(chatId, { last_message_id: result.result.message_id });
@@ -1804,6 +1813,27 @@ async function handleMessage(message) {
   }
 
   if (message.location) {
+    // If user is mid-way adding a named location, route the shared pin into the
+    // add-location flow instead of overwriting the default location.
+    const pendingAction = pendingCallbacks[chatId]?.action;
+    if (pendingAction === 'location_name' || pendingAction === 'location_coords') {
+      const lat = message.location.latitude;
+      const lon = message.location.longitude;
+      const name = pendingAction === 'location_coords'
+        ? pendingCallbacks[chatId].name
+        : t((await getUser(chatId))?.language || 'uk', 'set_locations');
+      delete pendingCallbacks[chatId];
+      await addUserLocation(chatId, name, lat, lon);
+      const u2 = await getUser(chatId);
+      const lang2 = u2?.language || 'uk';
+      const locations = await getUserLocations(chatId);
+      await sendWithFallback(chatId, `✅ ${t(lang2, 'location_saved_success')} "${name}"`, {
+        reply_markup: { remove_keyboard: true },
+      });
+      await sendWithFallback(chatId, `${t(lang2, 'your_locations')}`, { reply_markup: locationsKeyboard(lang2, locations) });
+      return;
+    }
+
     await saveUser(chatId, {
       latitude: message.location.latitude,
       longitude: message.location.longitude,
@@ -1813,7 +1843,8 @@ async function handleMessage(message) {
     const lang = user?.language || 'uk';
     const weatherData = await getRainForecast(message.location.latitude, message.location.longitude, chatId);
     const settings = await getUserSettings(chatId);
-    const w = formatWeatherMessage(weatherData, lang, settings);
+    const label = await locationLabel(chatId, message.location.latitude, message.location.longitude);
+    const w = formatWeatherMessage(weatherData, lang, settings, label);
     const savedPrefix = `<b>${t(lang, 'location_saved')}</b>`;
     const result = await sendWithFallback(chatId, `${savedPrefix}\n\n${w.rich}`, { reply_markup: mainMenuKeyboard(lang) }, `${savedPrefix}\n\n${w.plain}`);
     if (result.ok) {
@@ -1866,7 +1897,13 @@ async function handleMessage(message) {
       return;
     }
     pendingCallbacks[chatId] = { action: 'location_coords', name: locName, messageId: pendingCallbacks[chatId].messageId };
-    await sendWithFallback(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`);
+    await sendWithFallback(chatId, `📍 ${t(lang, 'location_add_prompt')}: "${locName}"`, {
+      reply_markup: {
+        keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
+        one_time_keyboard: true,
+        resize_keyboard: true,
+      },
+    });
     return;
   }
 
@@ -1890,7 +1927,13 @@ async function handleMessage(message) {
     }
 
     if (lat == null || lon == null) {
-      await sendWithFallback(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`);
+      await sendWithFallback(chatId, `${t(lang, 'error_name_empty')}. ${t(lang, 'location_add_prompt')}:`, {
+        reply_markup: {
+          keyboard: [[{ text: `📍 ${t(lang, 'send_geolocation')}`, request_location: true }]],
+          one_time_keyboard: true,
+          resize_keyboard: true,
+        },
+      });
       return;
     }
 
