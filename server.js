@@ -815,9 +815,11 @@ async function getRainForecast(lat, lon, chatId) {
   // 4. WeatherAPI/OWM/Rainbow: supplementary — ALWAYS check, not just when dry
   if (chatId) {
     const providers = [
-      { name: 'weatherapi', fn: fetchWeatherAPI },
+      // WeatherAPI and Rainbow are disabled: user-provided OWM is the only
+      // supplementary source (its own key has a generous rate limit).
+      // { name: 'weatherapi', fn: fetchWeatherAPI },
       { name: 'owm', fn: fetchOWM },
-      { name: 'rainbow', fn: fetchRainbowWeather },
+      // { name: 'rainbow', fn: fetchRainbowWeather },
     ];
     for (const p of providers) {
       try {
@@ -2015,8 +2017,13 @@ async function checkAllUsers() {
       );
       let needsRainAlert = weatherData.isRaining || rainSoon;
 
-      // Additional threshold checks
-      if (needsRainAlert && weatherData.current) {
+      // User-provided OWM key => OWM is authoritative and unconditional.
+      // Its alert should not be suppressed by Open-Meteo-derived gates
+      // (wind/humidity/temp filters are read from Open-Meteo "current").
+      const owmAuthoritative = weatherData.hasOwmKey && weatherData.rainSignals.includes('OWM-authoritative');
+
+      // Additional threshold checks (skipped when OWM is authoritative)
+      if (!owmAuthoritative && needsRainAlert && weatherData.current) {
         if (settings?.wind_threshold_kmh && weatherData.current.wind_speed < settings.wind_threshold_kmh) {
           needsRainAlert = false;
         }
@@ -2027,6 +2034,7 @@ async function checkAllUsers() {
           needsRainAlert = false;
         }
       }
+      if (owmAuthoritative) needsRainAlert = true;
 
       // Debounce: check if rain state changed from last check
       const wasRaining = user.last_rain_state || false;
