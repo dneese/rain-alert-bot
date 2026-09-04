@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import { createRequire } from 'module';
-import { initDB, getUser, saveUser, getAllUsers, getUserApiKey, getAllUserApiKeys, saveUserApiKey, deleteUserApiKey, getUserSettings, saveUserSettings, getUserLocations, getDefaultLocation, addUserLocation, setDefaultLocation, deleteUserLocation } from './lib/db.js';
+import { initDB, getUser, saveUser, getAllUsers, getUserApiKey, getAllUserApiKeys, saveUserApiKey, deleteUserApiKey, getUserSettings, saveUserSettings, getUserLocations, getDefaultLocation, addUserLocation, setDefaultLocation, deleteUserLocation, updateUserLocationState } from './lib/db.js';
 import { t, getLangName, getLangFlag, languagePages } from './lib/i18n.js';
 
 const require = createRequire(import.meta.url);
@@ -1000,13 +1000,18 @@ function formatDate(timeStr, lang, tzOffsetMs, ms) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString(locale, { day: 'numeric', month: 'long' });
 }
 
-function formatWeatherMessage(weatherData, lang, settings) {
+function formatWeatherMessage(weatherData, lang, settings, label) {
   const { current, minutely, forecast, radar, source, isRaining, nowLocalMs, tzOffsetMs } = weatherData;
 
   const err = `⚠️ ${t(lang, 'error_no_forecast')}`;
   if (!current && (!forecast || forecast.length === 0)) {
     return { rich: err, plain: err };
   }
+
+  // Location label (name from user_locations, else coords) prepended so a user
+  // with multiple locations always knows which one this message refers to.
+  const labelHtml = label ? `<b>${label}</b>\n` : '';
+  const labelPlain = label ? `${label}\n` : '';
 
   const nowLocalDate = new Date(Date.now() + (tzOffsetMs || 0));
   const nowTimeStr = `${nowLocalDate.getUTCHours().toString().padStart(2, '0')}:${nowLocalDate.getUTCMinutes().toString().padStart(2, '0')}`;
@@ -1191,7 +1196,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   // Best practices: one clear heading, short summary, h3 sections,
   // table with caption for structured data, blockquote/aside for key statuses,
   // details for optional depth, map + footer as closing blocks.
-  let rich = `<h2>${headerText}</h2>`;
+  let rich = `${labelHtml}<h2>${headerText}</h2>`;
   if (dailyLine) rich += `<p>${dailyLine}</p>`;
   if (curMain) {
     rich += `<table bordered striped><caption>📍 ${t(lang, 'current_label')}</caption>`;
@@ -1222,7 +1227,7 @@ function formatWeatherMessage(weatherData, lang, settings) {
   rich += `<hr/><footer>${footerParts.join(' | ')}</footer>`;
 
   // ===== PLAIN VERSION (fallback for Telegram Web/X/macOS) =====
-  let plain = `<b>${headerText}</b>`;
+  let plain = `${labelPlain}<b>${headerText}</b>`;
   if (dailyLine) plain += `\n${dailyLine}`;
   if (curMain) {
     plain += `\n\n📍 <b>${t(lang, 'current_label')}</b>\n${curMain[0]}  ${curMain[1]}\n${curExtra.join('   ')}`;
@@ -1911,23 +1916,29 @@ async function updateAllUsers() {
   let updated = 0;
 
   for (const user of users) {
-    if (!user.latitude || !user.last_message_id) continue;
+    if (!user.chat_id) continue;
 
-    try {
-      const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
-      const lang = user.language || 'uk';
-      const settings = await getUserSettings(user.chat_id);
-      const msg = formatWeatherMessage(weatherData, lang, settings);
-      const result = await editWithFallback(user.chat_id, user.last_message_id, msg.rich, {
-        reply_markup: mainMenuKeyboard(lang),
-      }, msg.plain);
-      if (result.ok) {
-        updated++;
-      } else {
-        console.warn(`Edit failed for ${user.chat_id}: ${JSON.stringify(result)}`);
+    const lang = user.language || 'uk';
+    const settings = await getUserSettings(user.chat_id);
+    const locations = await getUserLocations(user.chat_id);
+
+    for (const loc of locations) {
+      if (!loc.latitude || !loc.last_message_id) continue;
+      try {
+        const weatherData = await getRainForecast(loc.latitude, loc.longitude, user.chat_id);
+        const locLabel = await locationLabel(user.chat_id, loc.latitude, loc.longitude);
+        const msg = formatWeatherMessage(weatherData, lang, settings, locLabel);
+        const result = await editWithFallback(user.chat_id, loc.last_message_id, msg.rich, {
+          reply_markup: mainMenuKeyboard(lang),
+        }, msg.plain);
+        if (result.ok) {
+          updated++;
+        } else {
+          console.warn(`Edit failed for ${user.chat_id} loc ${loc.id}: ${JSON.stringify(result)}`);
+        }
+      } catch (err) {
+        console.error(`Update error for ${user.chat_id} loc ${loc.id}:`, err.message);
       }
-    } catch (err) {
-      console.error(`Update error for ${user.chat_id}:`, err.message);
     }
   }
   return updated;
@@ -1961,122 +1972,131 @@ async function checkAllUsers() {
   let edited = 0, alertsSent = 0;
 
   for (const user of users) {
-    if (!user.latitude) continue;
+    if (!user.chat_id) continue;
 
-    try {
-      const settings = await getUserSettings(user.chat_id);
-      const weatherData = await getRainForecast(user.latitude, user.longitude, user.chat_id);
-      const lang = user.language || 'uk';
+    const settings = await getUserSettings(user.chat_id);
+    const lang = user.language || 'uk';
 
-      // Quiet hours check
-      if (settings?.quiet_hours_start && settings?.quiet_hours_end) {
-        const now = new Date();
-        const [sh, sm] = settings.quiet_hours_start.split(':').map(Number);
-        const [eh, em] = settings.quiet_hours_end.split(':').map(Number);
-        const nowMin = now.getHours() * 60 + now.getMinutes();
-        const startMin = sh * 60 + sm;
-        const endMin = eh * 60 + em;
-        let inQuiet = false;
-        if (startMin <= endMin) {
-          inQuiet = nowMin >= startMin && nowMin < endMin;
-        } else {
-          inQuiet = nowMin >= startMin || nowMin < endMin;
+    // Each saved location is monitored independently (multi-location support).
+    const locations = await getUserLocations(user.chat_id);
+    if (!locations.length) continue;
+
+    for (const loc of locations) {
+      if (!loc.latitude) continue;
+      const locId = loc.id;
+      try {
+        const wasRaining = loc.last_rain_state || false;
+        const lastMessageId = loc.last_message_id || 0;
+        const lastAlert = loc.last_alert_time || 0;
+        const lastAdvanceWarn = Number(loc.last_advance_warn_ms) || 0;
+
+        const weatherData = await getRainForecast(loc.latitude, loc.longitude, user.chat_id);
+        const locLabel = await locationLabel(user.chat_id, loc.latitude, loc.longitude);
+
+        // Quiet hours check
+        if (settings?.quiet_hours_start && settings?.quiet_hours_end) {
+          const now = new Date();
+          const [sh, sm] = settings.quiet_hours_start.split(':').map(Number);
+          const [eh, em] = settings.quiet_hours_end.split(':').map(Number);
+          const nowMin = now.getHours() * 60 + now.getMinutes();
+          const startMin = sh * 60 + sm;
+          const endMin = eh * 60 + em;
+          let inQuiet = false;
+          if (startMin <= endMin) {
+            inQuiet = nowMin >= startMin && nowMin < endMin;
+          } else {
+            inQuiet = nowMin >= startMin || nowMin < endMin;
+          }
+          if (inQuiet) continue;
         }
-        if (inQuiet) continue;
-      }
 
-      const lookaheadMs = (settings?.lookahead_min || 30) * 60 * 1000;
-      const threshold = settings?.rain_threshold_mm || 0.5;
-      const cooldownMs = (settings?.alert_cooldown_min || 30) * 60 * 1000;
+        const lookaheadMs = (settings?.lookahead_min || 30) * 60 * 1000;
+        const threshold = settings?.rain_threshold_mm || 0.5;
+        const cooldownMs = (settings?.alert_cooldown_min || 30) * 60 * 1000;
 
-      const rainSoon = weatherData.minutely?.some(m =>
-        m.ms > weatherData.nowLocalMs &&
-        m.ms < weatherData.nowLocalMs + lookaheadMs &&
-        m.precip_mm >= threshold
-      );
-      let needsRainAlert = weatherData.isRaining || rainSoon;
+        const rainSoon = weatherData.minutely?.some(m =>
+          m.ms > weatherData.nowLocalMs &&
+          m.ms < weatherData.nowLocalMs + lookaheadMs &&
+          m.precip_mm >= threshold
+        );
+        let needsRainAlert = weatherData.isRaining || rainSoon;
 
-      // User-provided OWM key => OWM is authoritative and unconditional.
-      // Its alert should not be suppressed by Open-Meteo-derived gates
-      // (wind/humidity/temp filters are read from Open-Meteo "current").
-      const owmAuthoritative = weatherData.hasOwmKey && weatherData.rainSignals.includes('OWM-authoritative');
+        // User-provided OWM key => OWM is authoritative and unconditional.
+        const owmAuthoritative = weatherData.hasOwmKey && weatherData.rainSignals.includes('OWM-authoritative');
 
-      // Additional threshold checks (skipped when OWM is authoritative)
-      if (!owmAuthoritative && needsRainAlert && weatherData.current) {
-        if (settings?.wind_threshold_kmh && weatherData.current.wind_speed < settings.wind_threshold_kmh) {
-          needsRainAlert = false;
-        }
-        if (settings?.humidity_threshold_pct && weatherData.current.humidity < settings.humidity_threshold_pct) {
-          needsRainAlert = false;
-        }
-        if (settings?.temp_threshold_c != null && weatherData.current.temp_c > settings.temp_threshold_c) {
-          needsRainAlert = false;
-        }
-      }
-      if (owmAuthoritative) needsRainAlert = true;
-
-      // Debounce: check if rain state changed from last check
-      const wasRaining = user.last_rain_state || false;
-      const rainTransition = needsRainAlert && !wasRaining;
-
-      // Update rain state
-      await saveUser(user.chat_id, { last_rain_state: needsRainAlert });
-
-      const msg = formatWeatherMessage(weatherData, lang, settings);
-
-      // ALWAYS edit existing message (silent update, like /update)
-      if (user.last_message_id) {
-        const editResult = await editWithFallback(user.chat_id, user.last_message_id, msg.rich, {
-          reply_markup: mainMenuKeyboard(lang),
-        }, msg.plain);
-        if (editResult.ok) edited++;
-      }
-
-      // Send NEW message ONLY on rain transition (triggers notification)
-      // Uses per-user cooldown from settings
-      const lastAlert = user.last_alert_time || 0;
-      if (rainTransition && Date.now() - lastAlert > cooldownMs) {
-        const sendResult = await sendWithFallback(user.chat_id, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
-        if (sendResult.ok) {
-          await saveUser(user.chat_id, {
-            last_alert_time: Date.now(),
-            last_message_id: sendResult.result.message_id,
-          });
-          alertsSent++;
-        }
-      }
-      // Round up: advance warning for rain hours/days ahead (once per rain event)
-      const earlyWarnH = Number(settings?.early_warn_hours) || 0;
-      if (earlyWarnH > 0 && weatherData.forecast?.length) {
-        const earlyWarnHorizon = weatherData.nowLocalMs + earlyWarnH * 3600 * 1000;
-        const advanceGapMs = Math.max(lookaheadMs, 60 * 60 * 1000);
-        let earliestRainStart = null;
-        for (const h of weatherData.forecast) {
-          if (h.ms > weatherData.nowLocalMs + advanceGapMs && h.ms <= earlyWarnHorizon && h.precip_mm >= threshold) {
-            if (earliestRainStart === null || h.ms < earliestRainStart) earliestRainStart = h.ms;
+        // Additional threshold checks (skipped when OWM is authoritative)
+        if (!owmAuthoritative && needsRainAlert && weatherData.current) {
+          if (settings?.wind_threshold_kmh && weatherData.current.wind_speed < settings.wind_threshold_kmh) {
+            needsRainAlert = false;
+          }
+          if (settings?.humidity_threshold_pct && weatherData.current.humidity < settings.humidity_threshold_pct) {
+            needsRainAlert = false;
+          }
+          if (settings?.temp_threshold_c != null && weatherData.current.temp_c > settings.temp_threshold_c) {
+            needsRainAlert = false;
           }
         }
-        if (earliestRainStart) {
-          const lastAdvanceWarn = Number(settings.last_advance_warn_ms) || 0;
-          const alreadyWarned = lastAdvanceWarn > 0 && Math.abs(earliestRainStart - lastAdvanceWarn) < 30 * 60 * 1000;
-          if (!alreadyWarned) {
-            const advItem = weatherData.forecast.find(h => h.ms === earliestRainStart);
-            const hoursAway = Math.round((earliestRainStart - weatherData.nowLocalMs) / 3600000);
-            const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs, advItem.ms);
-            const advTime = localTimeStr(advItem.ms, weatherData.tzOffsetMs);
-            const recAdv = settings?.posture === 'outside' ? t(lang, 'advance_rain_outside') : t(lang, 'advance_rain_inside');
-            const locLabel = await locationLabel(user.chat_id, user.latitude, user.longitude);
-            const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${locLabel}\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
-            const advSend = await sendWithFallback(user.chat_id, advMsg, {});
-            if (advSend.ok) {
-              await saveUserSettings(user.chat_id, { last_advance_warn_ms: earliestRainStart });
-              alertsSent++;
+        if (owmAuthoritative) needsRainAlert = true;
+
+        // Debounce: check if rain state changed from last check (per location)
+        const rainTransition = needsRainAlert && !wasRaining;
+
+        // Update rain state for THIS location in DB
+        await updateUserLocationState(user.chat_id, locId, { last_rain_state: needsRainAlert });
+
+        const msg = formatWeatherMessage(weatherData, lang, settings, locLabel);
+
+        // ALWAYS edit existing message (silent update, like /update)
+        if (lastMessageId) {
+          const editResult = await editWithFallback(user.chat_id, lastMessageId, msg.rich, {
+            reply_markup: mainMenuKeyboard(lang),
+          }, msg.plain);
+          if (editResult.ok) edited++;
+        }
+
+        // Send NEW message ONLY on rain transition (triggers notification)
+        if (rainTransition && Date.now() - lastAlert > cooldownMs) {
+          const sendResult = await sendWithFallback(user.chat_id, msg.rich, { reply_markup: mainMenuKeyboard(lang) }, msg.plain);
+          if (sendResult.ok) {
+            await updateUserLocationState(user.chat_id, locId, {
+              last_alert_time: Date.now(),
+              last_message_id: sendResult.result.message_id,
+            });
+            alertsSent++;
+          }
+        }
+
+        // Round up: advance warning for rain hours/days ahead (once per rain event)
+        const earlyWarnH = Number(settings?.early_warn_hours) || 0;
+        if (earlyWarnH > 0 && weatherData.forecast?.length) {
+          const earlyWarnHorizon = weatherData.nowLocalMs + earlyWarnH * 3600 * 1000;
+          const advanceGapMs = Math.max(lookaheadMs, 60 * 60 * 1000);
+          let earliestRainStart = null;
+          for (const h of weatherData.forecast) {
+            if (h.ms > weatherData.nowLocalMs + advanceGapMs && h.ms <= earlyWarnHorizon && h.precip_mm >= threshold) {
+              if (earliestRainStart === null || h.ms < earliestRainStart) earliestRainStart = h.ms;
+            }
+          }
+          if (earliestRainStart) {
+            const alreadyWarned = lastAdvanceWarn > 0 && Math.abs(earliestRainStart - lastAdvanceWarn) < 30 * 60 * 1000;
+            if (!alreadyWarned) {
+              const advItem = weatherData.forecast.find(h => h.ms === earliestRainStart);
+              const hoursAway = Math.round((earliestRainStart - weatherData.nowLocalMs) / 3600000);
+              const advDate = formatDate(advItem.timeStr, lang, weatherData.tzOffsetMs, advItem.ms);
+              const advTime = localTimeStr(advItem.ms, weatherData.tzOffsetMs);
+              const recAdv = settings?.posture === 'outside' ? t(lang, 'advance_rain_outside') : t(lang, 'advance_rain_inside');
+              const advMsg = `<b>☔ ${t(lang, 'advance_rain_title')}</b>\n\n${locLabel}\n${t(lang, 'advance_rain_msg', { date: advDate, time: advTime, hours: hoursAway })}\n\n${recAdv}`;
+              const advSend = await sendWithFallback(user.chat_id, advMsg, {});
+              if (advSend.ok) {
+                await updateUserLocationState(user.chat_id, locId, { last_advance_warn_ms: earliestRainStart });
+                alertsSent++;
+              }
             }
           }
         }
+      } catch (err) {
+        console.error(`Check error for ${user.chat_id} loc ${locId}:`, err.message);
       }
-    } catch (err) {
-      console.error(`Check error for ${user.chat_id}:`, err.message);
     }
   }
   return { edited, alertsSent };
